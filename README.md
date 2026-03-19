@@ -1,4 +1,4 @@
-# AI Engineering template (with uv)
+# Cite-and-Verify Vision Language Model with Chain-of_Thought
 
 ----------------------------------------------------------------------------------------
 
