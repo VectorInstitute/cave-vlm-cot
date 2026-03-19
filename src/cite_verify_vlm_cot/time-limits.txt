@@ -1,0 +1,50 @@
+| Partition   | GPUs | MaxTime                   |
+| ----------- | ---- | ------------------------- |
+| **cpu_b1**  | none | **3 hours** (`03:00:00`)  |
+| **cpu_b2**  | none | **3 days** (`3-00:00:00`) |
+| **cpu_b3**  | none | **7 days** (`7-00:00:00`) |
+| **a40_b1**  | A40  | **3 hours**               |
+| **a40_b2**  | A40  | **3 days**                |
+| **a40_b3**  | A40  | **7 days**                |
+| **a100_b1** | A100 | **3 hours**               |
+| **a100_b2** | A100 | **3 days**                |
+| **a100_b3** | A100 | **7 days**                |
+
+| QOS           | Priority | Notes                                                                                                  |
+| ------------- | -------- | ------------------------------------------------------------------------------------------------------ |
+| **normal**    | 1000     | Default, unlimited, lowest priority                                                                    |
+| **high**      | 2000     | Higher priority than normal                                                                            |
+| **benchmark** | 2000     | **BUT limited**: Max 1 GPU per job, Max walltime **1 day** (1-00:00:00), and cluster-level constraints |
+
+du -sh ~/.local/lib/python*/site-packages | sort -h (unused python packages)
+rm -rf ~/.cache/pip
+rm -rf ~/.cache/huggingface
+rm -rf ~/.cache/torch
+du -sh ~/.local
+du -sh ~/.cache
+
+du -sh ~/.cache/huggingface
+
+# Check available partitions
+sinfo -s
+PARTITION AVAIL  TIMELIMIT   NODES(A/I/O/T) NODELIST
+cpu_b1       up    3:00:00         0/9/2/11 cpu[001-011]
+cpu_b2       up 3-00:00:00          0/5/2/7 cpu[001-007]
+cpu_b3       up 7-00:00:00          0/4/0/4 cpu[008-011]
+a40_b1*      up    3:00:00        20/3/6/29 gpu[002-016,027-038,040,042]
+a40_b2       up 3-00:00:00        13/1/3/17 gpu[002-016,027-028]
+a40_b3       up 7-00:00:00         7/2/3/12 gpu[029-038,040,042]
+a100_b1      up    3:00:00          0/0/7/7 gpu[181-187]
+a100_b2      up 3-00:00:00          0/0/4/4 gpu[181-184]
+a100_b3      up 7-00:00:00          0/0/4/4 gpu[184-187]
+
+# Try other GPU partitions (examples - your cluster may differ)
+sbatch --partition=gpu job.sh
+sbatch --partition=rtx6000 job.sh
+sbatch --partition=t4v2 job.sh
+
+# See which nodes are available
+sinfo -N -l
+
+# See why nodes are down
+sinfo -R
