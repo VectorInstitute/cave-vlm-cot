@@ -28,7 +28,7 @@ Each stage is a node in a **LangGraph** state machine. The shared `State` Pydant
 Requires Python 3.10+ and three A100 GPUs (80 GB each).
 
 ```bash
-git clone https://github.com/your-org/cave-vlm-cot.git
+git clone https://github.com/VectorInstitute/cave-vlm-cot.git
 cd cave-vlm-cot/src/cite_verify_vlm_cot
 
 # Create and activate virtual environment
