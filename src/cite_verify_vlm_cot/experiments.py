@@ -70,10 +70,6 @@ load_dotenv()  # loads .env into os.environ before any key checks
 # Deep learning
 import torch
 from evaluations import (
-    # image_roi_coverage,
-    # image_roi_mrr,
-    # image_roi_source_precision,
-    # image_roi_source_recall,
     mean_reciprocal_rank,
     ndcg_at_k,
     planner_coverage_score,
@@ -91,12 +87,12 @@ from phoenix.client import Client
 from utils import State, safe_str, safe_parse_json
 from transformers import AutoProcessor, MllamaForConditionalGeneration
 from unsloth import FastLanguageModel
-from verifier import build_cave_vlm_cot_graph
+from verifier.verifier import build_cave_vlm_cot_graph
 
 # Load your data
 df = pd.read_csv("scienceqa_augmented.csv")
-df = df.iloc[:1000]
-# df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+df = df.iloc[:5000]
+df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 # Shard the dataframe.
 # Each shard gets a contiguous, non-overlapping slice.
 # If the CSV is not pre-shuffled by subject, add:
@@ -165,7 +161,7 @@ experiments_client = Client(
 # Upload dataset to Phoenix
 try:
     cave_dataset = experiments_client.datasets.create_dataset(
-        name=f"scienceqa-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}",
+        name=f"scienceqa-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
         dataframe=experiment_df,
         input_keys=[
             "pid", "question", "hint", "choices", "lecture", "answer", 
@@ -178,7 +174,7 @@ try:
 except Exception as e:
     print(f"Dataset creation note: {e}")
     cave_dataset = experiments_client.datasets.get_dataset(
-        dataset=f"scienceqa-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}",
+        dataset=f"scienceqa-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
         timeout=10000
     )
     print(f"Using existing dataset: {cave_dataset.name}")
@@ -317,12 +313,6 @@ def eval_text_citation_precision(output: dict) -> float:
         return 0.0
     return output.get("text_citation_precision", 0.0)
 
-# def eval_roi_citation_precision(output: dict) -> float:
-#     """Extract pre-computed ROI citation precision."""
-#     if output is None:
-#         return 0.0
-#     return output.get("roi_citation_precision", 0.0)
-
 def eval_ais(output: dict) -> float:
     """Extract pre-computed AIS (Attribution Score)."""
     if output is None:
@@ -393,11 +383,6 @@ ALL_EVALUATORS = [
     eval_ndcg,
     eval_recall_pass,
     eval_coverage_pass,
-    # Image ROI evaluators
-    # eval_image_roi_precision,
-    # eval_image_roi_recall,
-    # eval_image_roi_mrr,
-    # eval_total_rois,
     # Question Image citation evaluators (NEW - replacing ROI evaluators)
     eval_qi_citation_coverage,
     eval_qi_citation_count,
@@ -430,10 +415,10 @@ gc.collect()
 # the index was last built.  Without the size check, adding more rows to the
 # CSV would silently use a stale index that covers fewer documents.
 def _index_needs_rebuild(expected_rows: int) -> bool:
-    if not os.path.exists("text_index.faiss"):
+    if not os.path.exists(os.path.expanduser("~/outputs/text_index.faiss")):
         return True
     try:
-        idx = faiss.read_index("text_index.faiss")
+        idx = faiss.read_index(os.path.expanduser("~/outputs/text_index.faiss"))
         if idx.ntotal < expected_rows:
             print(f"Index has {idx.ntotal} vectors but dataset has {expected_rows} "
                   f"text rows — rebuilding.")
@@ -450,37 +435,8 @@ if _index_needs_rebuild(num_text_rows):
 
 # Load pre-built search indexes for fast retrieval
 print("Loading indexes...")
-text_index = faiss.read_index("text_index.faiss")
-# full_image_index is no longer used by retriever_step (ROI retrieval has been removed),
-# but experiments.py still passes it to build_cave_vlm_cot_graph for backward compat.
-# Load it only if the file exists to avoid a crash on fresh environments.
-# if os.path.exists("full_image_index.faiss"):
-#     full_image_index = faiss.read_index("full_image_index.faiss")
-# else:
-#     print("WARNING: full_image_index.faiss not found — ROI retrieval is disabled, this is expected.")
-#     full_image_index = None
-data = pd.read_csv("multimodal_embeddings.csv")
-
-# Load full image metadata (instead of ROI metadata)
-# image_metadata_path = "image_metadata.pkl"  # Changed!
-# if os.path.exists(image_metadata_path):
-#     with open(image_metadata_path, "rb") as f:
-#         image_metadata = pickle.load(f)
-#     print(f"Loaded {len(image_metadata)} full image metadata entries")
-# else:
-#     print(f"WARNING: {image_metadata_path} not found!")
-#     image_metadata = []
-
-# # Verify consistency
-# if image_index.ntotal != len(roi_metadata):
-#     print("WARNING: Mismatch between image_index and roi_metadata")
-
-# print(f"Loaded text_index with {text_index.ntotal} vectors")
-# print(f"Loaded image_index with {image_index.ntotal} vectors")
-# if full_image_index is not None:
-#     if full_image_index.ntotal != len(image_metadata):
-#         print("WARNING: Mismatch between full_image_index and image_metadata")
-#     print(f"Loaded full_image_index with {full_image_index.ntotal} vectors")
+text_index = faiss.read_index(os.path.expanduser("~/outputs/text_index.faiss"))
+data = pd.read_csv(os.path.expanduser("~/outputs/multimodal_embeddings.csv"))
 
 # Now load all the models needed for the pipeline
 print("\nLoading models for the pipeline...")
@@ -562,8 +518,6 @@ cave_vlm_cot_app = build_cave_vlm_cot_graph(
     planner_tokenizer=planner_tokenizer,
     planner_kwargs=planner_kwargs,
     text_index=text_index,
-    # image_index=full_image_index,
-    # roi_metadata=image_metadata,
     data=data,
     solver_model=solver_model,
     solver_processor=solver_processor,
@@ -571,9 +525,6 @@ cave_vlm_cot_app = build_cave_vlm_cot_graph(
     verifier_model=verifier_model,
     verifier_processor=verifier_processor,
     retrieval_k=5,
-    # image_index / roi_metadata kept for optional backward compat but not used
-    # image_index=full_image_index,
-    # roi_metadata=image_metadata,
 )
 print(" Graph compiled and ready!")
 
@@ -595,13 +546,8 @@ _DEFAULT_OUTPUT = {
     "qi_citation_count": 0,
     "qi_citation_precision": 0.0,
     "num_question_images": 0,
-    # "image_roi_precision": 0.0,
-    # "image_roi_recall": 0.0,
-    # "image_roi_mrr": 0.0,
-    # "total_rois_retrieved": 0,
     "cave_score": 0.0,
     "text_citation_precision": 0.0,
-    # "roi_citation_precision": 0.0,
     "accuracy": 0.0,
     "ais": 0.0,
     "hallucination_rate": 0.0,
@@ -676,12 +622,6 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
         # Compute retrieval metrics (using final attempt's retrieval results)
         recall_result = recall_at_k(result_state, k=2)
         print(f"Final recall: {recall_result['recall']:.2%}")
-
-        # Compute image ROI metrics (may return None for questions with no images)
-        # roi_coverage = image_roi_coverage(result_state)
-        # roi_precision = image_roi_source_precision(result_state)
-        # roi_recall = image_roi_source_recall(result_state)
-        # roi_mrr_val = image_roi_mrr(result_state)
         
         # Compute CaVeScore once and reuse in verifier quality to avoid double NLI
         cave_score = compute_cave_score(result_state)
@@ -707,11 +647,6 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
             "precision_at_2": precision_at_k(result_state, k=2),
             "mrr": mean_reciprocal_rank(result_state),
             "ndcg_at_2": ndcg_at_k(result_state, k=2),
-            # Image ROI metrics
-            # "image_roi_precision": roi_precision,
-            # "image_roi_recall": roi_recall,
-            # "image_roi_mrr": roi_mrr_val,
-            # "total_rois_retrieved": roi_coverage["total_rois_retrieved"],
             # Question Image citation metrics (NEW - replacing ROI metrics)
             "qi_citation_coverage": cave_score["qi_citation_coverage"],
             "qi_citation_count": cave_score["qi_citation_count"],

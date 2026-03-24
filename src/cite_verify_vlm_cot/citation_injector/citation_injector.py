@@ -4,7 +4,7 @@ citation_injector.py — Post-hoc citation injection for CaVe-VLM-CoT pipeline.
 Works as a post-processing step between solver and verifier in the LangGraph pipeline.
 
 Integration in verifier.py / build_cave_vlm_cot_graph:
-    from citation_injector import inject_citations_step
+    from citation_injector.citation_injector import inject_citations_step
 
     # Option A: Add as a separate node
     graph.add_node("inject_citations", inject_citations_step)
@@ -20,8 +20,8 @@ import re
 import os
 from typing import List, Dict, Tuple, Optional
 
-from planner import State
-from retriever import cross_encoder, web_search
+from utils import State
+from retriever.retriever import cross_encoder, web_search
 from utils import ChunkInfo
 
 # ms-marco cross-encoder scores range roughly -10 to +10

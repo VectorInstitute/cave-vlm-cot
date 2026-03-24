@@ -1,3 +1,9 @@
+"""
+utils.py
+-------------------
+Pydantic state models, shared utilities, and FAISS index construction
+for the CaVe-VLM-CoT retrieval pipeline.
+"""
 import ast
 import base64
 import gc
@@ -6,7 +12,7 @@ import math
 import os
 import pickle
 from io import BytesIO
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import faiss
 import numpy as np
@@ -14,6 +20,17 @@ import pandas as pd
 import torch
 from PIL import Image
 from pydantic import BaseModel
+
+# Constants
+DEFAULT_CSV_PATH = "scienceqa_augmented.csv"
+MAX_ROWS = 5000
+TEXT_INDEX_PATH = "text_index.faiss"
+IMAGE_INDEX_PATH = "full_image_index.faiss"
+IMAGE_METADATA_PATH = "image_metadata.pkl"
+EMBEDDINGS_CSV_PATH = "multimodal_embeddings.csv"
+
+# Ordered list of text fields used to build a document's text representation.
+TEXT_FIELD_ORDER = ["subject", "topic", "category", "skill", "lecture", "hint", "solution"]
 
 # Pydantic models
 # NOTE: Pydantic v2 models do NOT support dict-style access:
@@ -102,208 +119,12 @@ def safe_parse_json(x, default=None):
         except (ValueError, SyntaxError):
             return default if default is not None else {}
 
-# def extract_rois(image_path: str, subject: str = "", topic: str = "") -> List[dict]:
-#     from retriever import classify_image_type, extract_cc_rois, extract_gdino_rois, _is_blank, _nms, MAX_ROIS
-
-#     img_pil  = Image.open(image_path).convert("RGB").resize((224, 224), Image.LANCZOS)
-#     img_arr  = np.array(img_pil)
-#     img_type = classify_image_type(img_arr)
-#     fname    = os.path.basename(image_path)
-#     print(f"  [{fname}] type={img_type}")
-
-#     raw_rois = []
-#     if img_type == "diagram_text":
-#         raw_rois = extract_cc_rois(img_arr)
-#         if not raw_rois:
-#             print(f"  [{fname}] CC found nothing → trying GDINO")
-#             raw_rois = extract_gdino_rois(img_pil, img_arr, subject, topic)
-#     else:
-#         raw_rois = extract_gdino_rois(img_pil, img_arr, subject, topic)
-#         if not raw_rois:
-#             print(f"  [{fname}] GDINO found nothing → trying CC")
-#             raw_rois = extract_cc_rois(img_arr)
-
-#     if not raw_rois:
-#         print(f"  [{fname}] both methods found nothing → skipping image")
-#         return []
-
-#     # shared post-processing
-#     filtered = []
-#     for r in raw_rois:
-#         x1, y1, x2, y2 = int(r["bbox"][0]), int(r["bbox"][1]), int(r["bbox"][2]), int(r["bbox"][3])
-#         patch = img_arr[y1:y2, x1:x2]
-#         if patch.size > 0 and not _is_blank(patch):
-#             filtered.append(r)
-#     deduped = _nms(filtered)
-#     final   = deduped[:MAX_ROIS]
-
-#     result = []
-#     for roi in final:
-#         result.append({
-#             "roi_id":            f"{fname}_{tuple(roi['bbox'])}",
-#             "bbox":              roi["bbox"],
-#             "image_patch":       roi["image_patch"],
-#             "source_image_path": image_path,
-#             "subject":           subject,
-#             "topic":             topic,
-#         })
-#     print(f"  [{fname}] → {len(result)} RoIs")
-#     return result
-
-# Index builder
-# def build_indexes(csv_path: str = "scienceqa_augmented.csv"):
-#     """Build text + image FAISS indexes and ROI metadata from the augmented CSV."""
-#     from retriever import image_embedding, text_to_embedding
-
-#     df = pd.read_csv(csv_path)
-#     df = df.iloc[:1000]
-
-#     # initialise data as an empty DataFrame so pd.concat works from the first row
-#     data = pd.DataFrame()
-
-#     roi_meta: list = []
-
-#     for idx, row in df.iterrows():
-#         hint = safe_str(row.get("hint"))
-#         lecture = safe_str(row.get("lecture"))
-#         solution = safe_str(row.get("solution"))
-#         subject = safe_str(row.get("subject"))
-#         topic = safe_str(row.get("topic"))
-#         category = safe_str(row.get("category"))
-#         skill = safe_str(row.get("skill"))
-
-#         img_captions = safe_parse_json(row.get("img_captions"), default={})
-
-#         text_parts = [p for p in [subject, topic, category, skill, lecture, hint, solution] if p]
-#         text = ". ".join(text_parts) + "."
-#         embedding = text_to_embedding(text)
-
-#         text_row = {
-#             "media_type": "text",
-#             "text": text,
-#             "embeddings": embedding.tolist(),
-#             "subject": subject,
-#             "topic": topic,
-#             "category": category,
-#         }
-#         data = pd.concat([data, pd.DataFrame([text_row])], ignore_index=True)
-
-#         torch.cuda.empty_cache()
-#         gc.collect()
-
-#         image_paths = safe_parse_json(row.get("image_paths"), default=[])
-#         if not isinstance(image_paths, list):
-#             image_paths = []
-
-#         if not image_paths:
-#             print(f"Row {idx}: no images to process")
-#             continue
-
-#         print(f"Row {idx} image paths: {image_paths}")
-
-#         for image_path in image_paths:
-#             if not image_path or not os.path.exists(image_path):
-#                 print(f"  Skipping missing file: {image_path}")
-#                 continue
-
-#             img_filename = os.path.basename(image_path)
-#             img_caption = img_captions.get(img_filename, "")
-
-#             rois = extract_rois(image_path, subject=subject, topic=topic)
-#             for roi in rois:
-#                 patch_bytes = base64.b64decode(roi["image_patch"])
-#                 patch_pil = Image.open(BytesIO(patch_bytes)).convert("RGB")
-#                 p_embedding = image_embedding(patch_pil)
-
-#                 roi_meta.append(
-#                     {
-#                         "roi_id": roi["roi_id"],
-#                         "bbox": roi["bbox"],
-#                         "source_image_path": image_path,
-#                         "image_patch": roi["image_patch"],
-#                         "caption": img_caption,
-#                         "subject": subject,
-#                         "topic": topic,
-#                     }
-#                 )
-
-#                 data = pd.concat(
-#                     [
-#                         data,
-#                         pd.DataFrame(
-#                             [
-#                                 {
-#                                     "media_type": "image",
-#                                     "roi_id": roi["roi_id"],
-#                                     "source_image": image_path,
-#                                     "image_patch": roi["image_patch"],
-#                                     "bbox": str(roi["bbox"]),
-#                                     "text": img_caption,
-#                                     "embeddings": p_embedding[0].tolist(),
-#                                 }
-#                             ]
-#                         ),
-#                     ],
-#                     ignore_index=True,
-#                 )
-
-#             torch.cuda.empty_cache()
-#             gc.collect()
-
-#     # Persist embeddings DataFrame
-#     data.to_csv("multimodal_embeddings.csv", index=False)
-
-#     # Persist ROI metadata
-#     roi_metadata_path = "roi_metadata.pkl"
-#     with open(roi_metadata_path, "wb") as f:
-#         pickle.dump(roi_meta, f)
-#     print(f"Saved {len(roi_meta)} ROI metadata entries to {roi_metadata_path}")
-
-#     # Verify the pickle round-trips correctly
-#     with open(roi_metadata_path, "rb") as f:
-#         verify_metadata = pickle.load(f)
-#     print(f"Verified: {len(verify_metadata)} ROI metadata entries loaded back successfully")
-
-#     # Build and save FAISS indexes
-#     text_data = data[data["media_type"] == "text"]
-#     image_data = data[data["media_type"] == "image"]
-
-#     if len(text_data):
-#         text_vectors = np.vstack(text_data["embeddings"].values).astype(np.float32)
-#         text_index = faiss.IndexFlatIP(text_vectors.shape[1])
-#         text_index.add(text_vectors)
-#         faiss.write_index(text_index, "text_index.faiss")
-#         print(f"Text index: {len(text_data)} entries")
-
-#     if len(image_data):
-#         image_vectors = np.vstack(image_data["embeddings"].values).astype(np.float32)
-#         image_index = faiss.IndexFlatIP(image_vectors.shape[1])
-#         image_index.add(image_vectors)
-#         faiss.write_index(image_index, "image_index.faiss")
-#         print(f"Image index: {len(image_data)} entries")
-
-#         if len(roi_meta) != image_index.ntotal:
-#             print(
-#                 f"ERROR: Mismatch — roi_metadata={len(roi_meta)}, "
-#                 f"image_index={image_index.ntotal}"
-#             )
-#         else:
-#             print(f"Image index and ROI metadata consistent ({len(roi_meta)} entries)")
-
-#     print("\nINDEX CREATION SUMMARY")
-#     print(f"  Text entries:  {len(text_data)}")
-#     print(f"  Image entries: {len(image_data)}")
-#     print(f"  ROI metadata:  {len(roi_meta)}")
-
-#     # Return data so callers don't have to reload the CSV
-#     return data
-
 def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
     """Build indexes storing FULL IMAGES instead of ROI patches."""
-    from retriever import image_embedding, text_to_embedding
+    from retriever.retriever import image_embedding, text_to_embedding
 
     df = pd.read_csv(csv_path)
-    df = df.iloc[:1000]
+    df = df.iloc[:5000]
     
     data = pd.DataFrame()
     image_metadata = []
@@ -374,7 +195,9 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
         gc.collect()
 
     # Save metadata
-    with open("image_metadata.pkl", "wb") as f:
+    _out_dir = os.path.expanduser("~/outputs")
+    os.makedirs(_out_dir, exist_ok=True)
+    with open(os.path.join(_out_dir, "image_metadata.pkl"), "wb") as f:
         pickle.dump(image_metadata, f)
     print(f"Saved {len(image_metadata)} full image metadata entries")
 
@@ -386,7 +209,7 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
     data_to_save["embeddings"] = data_to_save["embeddings"].apply(
         lambda e: json.dumps(e) if isinstance(e, list) else e
     )
-    data_to_save.to_csv("multimodal_embeddings.csv", index=False)
+    data_to_save.to_csv(os.path.join(_out_dir, "multimodal_embeddings.csv"), index=False)
     print(f"Saved multimodal_embeddings.csv ({len(data_to_save)} rows)")
 
     # Build TEXT index — filter first, then reset index so FAISS row numbers
@@ -398,7 +221,7 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
         text_vectors = np.vstack(text_data["embeddings"].values).astype(np.float32)
         text_index = faiss.IndexFlatIP(text_vectors.shape[1])
         text_index.add(text_vectors)
-        faiss.write_index(text_index, "text_index.faiss")
+        faiss.write_index(text_index, os.path.join(_out_dir, "text_index.faiss"))
         print(f"Text index: {len(text_data)} entries")
 
     # Build IMAGE index (full images)
@@ -407,7 +230,7 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
         image_vectors = np.vstack(image_data["embeddings"].values).astype(np.float32)
         image_index = faiss.IndexFlatIP(image_vectors.shape[1])
         image_index.add(image_vectors)
-        faiss.write_index(image_index, "full_image_index.faiss")
+        faiss.write_index(image_index, os.path.join(_out_dir, "full_image_index.faiss"))
         print(f"Full image index: {len(image_data)} entries")
 
     print(f"\nINDEX SUMMARY:")

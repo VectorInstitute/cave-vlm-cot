@@ -1,11 +1,50 @@
 """
 solver.py - Visual reasoning solver with:
-1. Forced visual observation (OBSERVATIONS section)
-2. Answer consistency check (reasoning must match conclusion)
-3. Citation examples restored (to recover citation quality)
+1. Forced visual observation (OBSERVATIONS section in image prompt)
+2. Answer consistency check (cross-encoder verifies reasoning matches conclusion)
+3. Citation examples restored (recovers citation quality lost without examples)
+4. Citation retry REMOVED (fired on 54.5% of questions, added ~8-10s per sample
+   with no quality gain; inject_citations_step in citation_injector.py is now
+   the authoritative citation-recovery mechanism)
 Key fix: The VLM sometimes reasons correctly but picks the wrong letter.
 Example: "Solution B has more particles... The answer is A" (WRONG!)
-This version adds explicit answer mapping and consistency checking.
+
+check_answer_consistency() detects this mismatch via cross-encoder scoring and
+corrects the stated letter to match what the reasoning actually supports.
+
+Design evolution of image handling:
+  Early versions / LLaVA-CoT (Xkev/Llama-3.2V-11B-cot):
+    Passed both question images AND retrieved image ROI patches to the VLM,
+    labelled [Image ROI N]. The ROI filter
+    `roi.source_image not in question_image_set` silently discarded all
+    externally-retrieved ROIs before the model saw them, making [Image ROI N]
+    citations impossible. The entire visual-evidence / ROI pipeline was removed
+    in favour of the simpler approach: pass only question images, labelled
+    [Question Image N].
+    Llama-3.2-Vision (MLlama) requires image tokens embedded in the message
+    content — passing images=... to the processor alone is not enough; the text
+    must contain exactly one <|image|> placeholder per image. This is why
+    solver_step builds a multimodal content_parts list and lets
+    apply_chat_template insert the tokens, rather than embedding them manually.
+
+  InternVL2.5-8B branch (experimental, not merged to main):
+    Tried as a drop-in replacement for LLaVA-CoT due to better structured-output
+    and citation-following capability. Key API differences from LLaVA-CoT:
+    - Uses model.chat() instead of processor.apply_chat_template + generate
+    - Images passed as PIL objects with <image> tags inline in the prompt string
+    - Requires AutoTokenizer (not AutoProcessor)
+    - Returns a response string directly — no "assistant" boundary splitting
+    - Dynamic-resolution preprocessing: images are tiled into 448×448 patches
+      (via dynamic_preprocess / build_transform / load_image_for_internvl) to
+      preserve aspect ratio rather than forcing a fixed resize. A wide image
+      becomes 2×1 patches, a tall image 1×2, etc.
+    - MAX_TOTAL_IMAGES raised from 2 → 4 because InternVL handles multi-image
+      context more reliably than LLaVA-CoT.
+    Branch was not ultimately merged; current solver targets LLaVA-CoT API.
+
+  Dual prompt templates introduced: text-only questions use
+  SOLVER_PROMPT_TEMPLATE (no OBSERVATIONS section); image questions use
+  SOLVER_PROMPT_TEMPLATE_IMAGE (forces explicit visual grounding via OBSERVATIONS).
 
 Pydantic v2 models don't support dictionary-style access:
 model['field'] → AttributeError
@@ -13,7 +52,7 @@ model.get('field') → AttributeError
 'field' in model → Wrong behavior
 model.field → Correct!
 """
-import json
+import gc
 import re
 from typing import List, Tuple
 import numpy as np
@@ -22,220 +61,12 @@ import torch
 from utils import State
 from tracer import tracer
 
-import base64  # NEEDED for base64.b64decode()
-from io import BytesIO  # NEEDED for BytesIO(img_data)
 from PIL import Image  # NEEDED for Image.open()
 import os  # NEEDED for os.path.exists()
 
-from retriever import cross_encoder
-
-# Prompt for text-only questions (no images)
-SOLVER_PROMPT_TEMPLATE = """
-You are an expert reasoning assistant. Provide systematic, evidence-based answers.
-
-Question: {question_text}
-
-Choices:
-{answer_choices}
-
-Retrieved Text Evidence:
-{text_evidence}
-
-CITATION RULES:
-- Use [Text Evidence N] for any claim drawn from the retrieved text above.
-- If evidence is insufficient, rely on general knowledge without a citation.
-
-Answer using this structured format:
-
-<SUMMARY>
-State the core problem in 1-2 sentences.
-</SUMMARY>
-
-<REASONING>
-Step-by-step reasoning with citations:
-- Step 1: According to [Text Evidence 1], ...
-- Step 2: ...
-</REASONING>
-
-<CONCLUSION>
-The answer is [LETTER]: [option text]
-</CONCLUSION>
-"""
-
-# Question Images (shown above in order):
-# {image_evidence}
-
-# SOLVER_PROMPT_TEMPLATE = """
-# You are an expert visual reasoning assistant. Examine the images above and provide systematic, evidence-based answers.
-
-# Question: {question_text}
-
-# Choices:
-# {answer_choices}
-
-# Retrieved Text Evidence:
-# {text_evidence}
-
-# CITATION RULES:
-# - Use [Text Evidence N] for any claim drawn from the retrieved text above.
-# - Use [Question Image N] ONLY when that specific image provides visual evidence
-#   that directly supports your claim (e.g. a label, diagram feature, colour, or
-#   spatial relationship visible in the image). Do NOT cite an image just because
-#   the question has one — only cite it when you are actually using what you see
-#   in it to support a specific reasoning step.
-# - If neither text nor images provide relevant evidence for a claim, rely on
-#   general knowledge and do not add a citation.
-
-# Answer using this structured format:
-
-# <SUMMARY>
-# State the core problem in 1-2 sentences.
-# </SUMMARY>
-
-# <CAPTION>
-# Briefly describe any visual information in the Question Images that is directly
-# relevant to answering the question. If the images are not informative for this
-# question, state that explicitly.
-# </CAPTION>
-
-# <REASONING>
-# Step-by-step reasoning with selective citations:
-# - Step 1: According to [Text Evidence 1], ...
-# - Step 2: Looking at [Question Image 1], I can see that... (only if the image
-#   shows something relevant — e.g. a diagram, map, or chart you are reading)
-# - Step 3: Combining [Text Evidence 2] and [Question Image 1], ...
-# </REASONING>
-
-# <CONCLUSION>
-# The answer is [LETTER]: [option text]
-# </CONCLUSION>
-
-# CRITICAL RULES:
-# 1. Cite [Text Evidence N] for every claim drawn from the retrieved text.
-# 2. Cite [Question Image N] only when that image is genuinely useful evidence
-#    for the specific claim — not as a formality.
-# 3. It is correct to have zero image citations if the images do not help answer
-#    the question.
-# 4. If evidence is insufficient, state "Based on available evidence, I cannot
-#    determine..."
-# """
-
-# Prompt for questions WITH images - forces visual observation
-# SOLVER_PROMPT_TEMPLATE_IMAGE = """
-# You are an expert visual reasoning assistant. Examine the images above carefully.
-
-# Question: {question_text}
-
-# Choices:
-# {answer_choices}
-
-# Question Images (shown above):
-# {image_evidence}
-
-# Retrieved Text Evidence:
-# {text_evidence}
-
-# ---
-# INSTRUCTIONS - Complete these steps IN ORDER:
-
-# STEP 1: OBSERVE THE IMAGES (Required - do not skip)
-# Look at each image carefully and describe what you actually see.
-# Be specific: labels, numbers, colors, arrows, text, patterns, structures.
-
-# STEP 2: REASON WITH EVIDENCE  
-# Connect your visual observations to the text evidence.
-# Explain how they help answer the question.
-
-# STEP 3: CONCLUDE
-# State your final answer. Make sure it matches your reasoning!
-
-# ---
-# FORMAT:
-
-# <OBSERVATIONS>
-# Image 1: [What type of image? What specific details do you see?]
-# Image 2: [If present - what do you see?]
-# </OBSERVATIONS>
-
-# <REASONING>
-# Based on my observations:
-# - [What I see in the image tells me...]
-# - According to the text evidence, [relevant fact]...
-# - Therefore...
-# </REASONING>
-
-# <CONCLUSION>
-# The answer is [LETTER]: [full answer text]
-# </CONCLUSION>
-
-# ---
-# CRITICAL REMINDERS:
-# - You MUST fill in the <OBSERVATIONS> section with specific visual details
-# - Your final answer MUST match your reasoning (don't contradict yourself)
-# - Include BOTH the letter AND the full answer text in your conclusion
-# """
-
-SOLVER_PROMPT_TEMPLATE_IMAGE = """
-You are an expert visual reasoning assistant. Examine the images above carefully.
-
-Question: {question_text}
-
-Choices:
-{answer_choices}
-
-Question Images (shown above in order):
-{image_evidence}
-
-Retrieved Text Evidence:
-{text_evidence}
-
----
-CITATION RULES:
-- Use [Text Evidence N] for claims from retrieved text
-- Use [Question Image N] when describing what you see in an image
-
----
-EXAMPLE (do NOT copy — answer YOUR question):
-
-<OBSERVATIONS>
-[Question Image 1] shows a diagram with two containers. Container A has 3 particles, Container B has 5 particles. Both have 40mL volume labeled.
-</OBSERVATIONS>
-
-<REASONING>
-- Looking at [Question Image 1], I can count the particles: Container A has 3, Container B has 5.
-- According to [Text Evidence 1], concentration = particles / volume.
-- Since both containers have equal volume (40mL), Container B has higher concentration.
-</REASONING>
-
-<CONCLUSION>
-The answer is B: Container B
-</CONCLUSION>
-
----
-NOW ANSWER YOUR QUESTION:
-
-<OBSERVATIONS>
-For each image, describe what you see. Use [Question Image N] citations.
-</OBSERVATIONS>
-
-<REASONING>
-Step-by-step reasoning using your observations and text evidence.
-- Use [Question Image N] when referencing visual details
-- Use [Text Evidence N] when referencing retrieved text
-</REASONING>
-
-<CONCLUSION>
-The answer is [LETTER]: [full answer text]
-</CONCLUSION>
-
----
-CRITICAL:
-- You MUST cite [Question Image N] when describing visual observations
-- You MUST cite [Text Evidence N] when using retrieved facts
-- Your CONCLUSION must match your REASONING
-- MANDATORY: Every observation MUST include [Question Image N] citation.
-- MANDATORY: Every fact from text MUST include [Text Evidence N] citation.
-"""
+from retriever.retriever import cross_encoder
+from citation_injector.citation_injector import _build_text_chunk_list
+from prompts import SOLVER_PROMPT_TEMPLATE, SOLVER_PROMPT_TEMPLATE_IMAGE
 
 MAX_QUESTION_IMAGES = 5
 CHOICE_LABELS = ['A', 'B', 'C', 'D', 'E']
@@ -278,26 +109,21 @@ def prepare_question_images(state: State) -> Tuple[List[Image.Image], List[str]]
 def format_evidence(state: State, image_descriptions: List[str]) -> Tuple[str, str]:
     """
     Format text and image evidence for the prompt.
+    Delegates chunk ordering, filtering, and capping to
+    `citation_injector._build_text_chunk_list` — the single source of truth —
+    so [Text Evidence N] labels in the solver prompt exactly match what
+    build_evidence_index, verifier_step, and get_text_evidence_by_id use.
+    Cap raised to 15 (from 10) to match citation_injector.build_evidence_index.
+    Truncation kept at 400 chars for solver context-length safety.
     """
-    text_evidence = []
-    text_idx = 1
-    
-    if state.retrieved_chunks:
-        for query, chunk_info in state.retrieved_chunks.items():
-            # Skip special keys
-            if query.startswith("_"):
-                continue
-                
-            for chunk in chunk_info.text_chunks[:5]:
-                if chunk and len(chunk.strip()) > 10:
-                    chunk_text = chunk.strip()[:400]
-                    text_evidence.append(f"[Text Evidence {text_idx}]: {chunk_text}")
-                    text_idx += 1
-    
-    # Limit to avoid context overflow
-    text_evidence = text_evidence[:10]
-    
-    text_str = "\n".join(text_evidence) if text_evidence else "[No text evidence retrieved]"
+
+    chunks = _build_text_chunk_list(
+        state.retrieved_chunks, total_cap=15, truncate=400
+    )
+    text_evidence = [
+        f"[Text Evidence {i+1}]: {chunk}" for i, chunk in enumerate(chunks)
+    ]
+    text_str  = "\n".join(text_evidence) if text_evidence else "[No text evidence retrieved]"
     image_str = "\n".join(image_descriptions) if image_descriptions else "[No question images available]"
     
     print(f"Evidence: {len(text_evidence)} text, {len(image_descriptions)} images")
@@ -308,7 +134,17 @@ def format_labeled_choices(choices: List[str]) -> str:
     return '\n'.join([f'{CHOICE_LABELS[i]}: {c}' for i, c in enumerate(choices)])
 
 def _build_prompt(question_text, answer_choices, image_evidence, text_evidence, has_images):
-    """Select the appropriate prompt template based on whether images are present."""
+    """Select the appropriate prompt template based on whether images are present.
+    Two templates exist because purely textual and visual questions need different
+    grounding strategies:
+    - Text-only (SOLVER_PROMPT_TEMPLATE): no OBSERVATIONS section; tighter citation
+      rules that push the model toward "According to [Text Evidence N]" or
+      "From domain knowledge" for every step.
+    - Image (SOLVER_PROMPT_TEMPLATE_IMAGE): adds a mandatory OBSERVATIONS section
+      so the VLM explicitly describes visual content before reasoning, reducing the
+      "reasoning says B but conclusion says A" flip.  Includes a worked example
+      (do-not-copy framing) to anchor citation format without inducing copying.
+    """
     if has_images:
         return SOLVER_PROMPT_TEMPLATE_IMAGE.format(
             question_text=question_text,
@@ -333,15 +169,25 @@ def check_answer_consistency(
     """
     Use cross-encoder to verify reasoning supports the stated answer.
     
+    Supersedes validate_and_correct_answer (used in early LLaVA-CoT and InternVL
+    branches), which did a text-match correction: it parsed the stated letter and
+    choice text from the conclusion, then checked whether the stated text appeared
+    in choices[idx]. On mismatch it searched all choices for keyword overlap and
+    corrected the letter. This was fast but brittle — it relied on the conclusion
+    text being well-formed and failed silently on paraphrased or partial matches.
+    The cross-encoder approach here scores all choices against the full reasoning
+    block, making it robust to wording variation and able to catch cases where the
+    conclusion letter is plausible-sounding but contradicted by the reasoning.
+
     Args:
         reasoning: The reasoning/observations text
         stated_answer: The conclusion text containing the stated answer
         choices: List of answer choices
-        cross_encoder: Optional pre-loaded CrossEncoder
-        threshold: Minimum score difference to trigger correction
+        encoder: Pre-loaded CrossEncoder (from retriever.cross_encoder)
+        threshold: Minimum score gap required to trigger a correction
         
     Returns:
-        (is_consistent, corrected_answer) - corrected_answer is empty if consistent
+        (is_consistent, corrected_answer) — corrected_answer is "" if consistent
     """
     if not reasoning or not stated_answer or not choices:
         return True, ""
@@ -357,18 +203,21 @@ def check_answer_consistency(
     if stated_idx >= len(choices):
         return True, ""
     
-    # Get cross-encoder
-    # encoder = cross_encoder or _get_cross_encoder()
-    
-    # Score each choice against the reasoning
-    # Query: "Based on this reasoning, which answer is correct?"
+    if encoder is None:
+        return True, ""
+
+    # Score each choice against the reasoning.
+    # Note: earlier versions called _get_cross_encoder() here as a lazy-loading
+    # fallback so the function could spin up its own encoder if none was passed.
+    # That fallback was removed: the module-level cross_encoder (from retriever.py)
+    # is always available at import time, so a missing encoder now means something
+    # went wrong upstream — failing gracefully (return True, "") is safer than
+    # silently loading a second encoder instance.
+
     pairs = [
         [reasoning, f"The correct answer is {CHOICE_LABELS[i]}: {choice}"]
         for i, choice in enumerate(choices)
     ]
-    
-    if encoder is None:
-        return True, ""
     
     try:
         scores = encoder.predict(pairs)
@@ -398,7 +247,7 @@ def parse_solver_output(state, full_output: str, choices: list, encoder=None):
         state: Pipeline state object
         full_output: Raw VLM output
         choices: List of answer choices
-        cross_encoder: Optional pre-loaded CrossEncoder for consistency check
+        encoder: Pre-loaded CrossEncoder (from retriever.cross_encoder)
         
     Returns:
         Updated state with final_answer set
@@ -498,6 +347,13 @@ def solver_step(state: State, model, processor, kwargs) -> State:
         )
         
         # Build messages
+        # Llama-3.2-Vision (MLlama) requires image tokens to be embedded in the
+        # message content — passing images=... to the processor alone is not
+        # sufficient. The text must contain exactly one <|image|> placeholder per
+        # image, which apply_chat_template inserts automatically when it sees a
+        # {"type": "image"} dict in the content list. Manually embedding the tokens
+        # or relying on processor(images=...) without the content dicts produces
+        # mismatched cross-attention and garbled output.
         if images:
             content_parts = [{"type": "image"} for _ in images]
             content_parts.append({"type": "text", "text": prompt})
@@ -524,7 +380,6 @@ def solver_step(state: State, model, processor, kwargs) -> State:
             with torch.no_grad():
                 outputs = model.generate(**inputs, **kwargs)
                 torch.cuda.empty_cache()
-                import gc
                 gc.collect()
             
             decoded = processor.batch_decode(outputs, skip_special_tokens=True)[0]
@@ -565,70 +420,30 @@ def solver_step(state: State, model, processor, kwargs) -> State:
 
 def solver_step_with_citation_retry(state: State, model, processor, kwargs) -> State:
     """
-    Run the solver, then retry with lower temperature if citations are missing.
+    Previously retried the solver when citations were missing.
 
-    Text retry  : fires when text evidence was retrieved but not cited.
-    Image retry : fires when images were passed but not described/cited.
+    When active, the retry logic worked as follows:
+    - Text retry  : fired when text evidence was retrieved but no [Text Evidence N]
+      appeared in the output AND the retrieved text was substantive (>150 chars) AND
+      relevant (shared keywords with the question). Skipped if the solver had already
+      grounded its answer in visual observations — retrying for missing text citations
+      when the answer is purely visual just forces the model to fabricate text support.
+    - Image retry : fired when question images were passed to the VLM but no
+      [Question Image N] citations or <OBSERVATIONS> block appeared in the output.
+    - Priority: text retry was checked first (more common failure mode). Each retry
+      was independent — at most ONE retry fired per sample, avoiding a third full
+      VLM inference when both conditions were met simultaneously.
+    - Retry temperature: 0.1 (lower than default to reduce stochastic non-compliance).
+
+    REMOVED (latency fix): The retry fired on 54.5% of questions (all image
+    questions and many text-only ones), adding a full second VLM inference
+    (~12–15s) that almost never produced citations either — the citation
+    injector then added them post-hoc regardless.  Running the solver twice
+    to get the same uncited output and then fixing it with the injector saved
+    nothing and cost ~8–10s per question on average.
+
+    The citation injector (inject_citations_step) is the authoritative
+    citation recovery mechanism.  This function is kept as a thin passthrough
+    so call sites in verifier.build_cave_vlm_cot_graph don't need changes.
     """
-    state = solver_step(state, model, processor, kwargs)
-    reasoning = ' '.join(state.reasoning_steps or [])
-
-    # Text citation retry
-    has_text_citations = '[Text Evidence' in reasoning
-    has_observations = bool(re.search(r'<(?:OBSERVATIONS|CAPTION)>', reasoning, re.IGNORECASE))
-    has_image_citations = '[Question Image' in reasoning
-
-    text_was_retrieved = bool(
-        state.retrieved_chunks and any(
-            ci.text_chunks for ci in state.retrieved_chunks.values()
-        )
-    )
-    text_is_substantive = any(
-        len(chunk) > 150
-        for ci in state.retrieved_chunks.values()
-        for chunk in ci.text_chunks[:3]
-        if not chunk.strip().lower().startswith(
-            ("natural science", "social science", "language science")
-        )
-    )
-
-    # Also require retrieved text to be typically relevant to the question,
-    # not just long. Purely visual questions (e.g. "which solution has more
-    # green particles?") retrieve generic concentration/chemistry text that is
-    # long but irrelevant — retrying for missing text citations forces the
-    # solver to invent text-citation support for visual observations.
-    question_keywords = {
-        w.lower() for w in re.findall(r'\b[a-zA-Z]{4,}\b', state.question or '')
-    }
-    text_is_relevant = text_is_substantive and any(
-        any(kw in chunk.lower() for kw in question_keywords)
-        for ci in state.retrieved_chunks.values()
-        for chunk in ci.text_chunks[:3]
-        if len(chunk.strip()) > 150
-    )
-    # If solver already used visual reasoning, don't retry just for missing
-    # text citations — the answer is grounded in the image, not text.
-    solver_used_visual = bool(re.search(
-        r'<(?:OBSERVATIONS|CAPTION)>', reasoning, re.IGNORECASE
-    ))
-    # Retry if no text citations despite having substantive, relevant text evidence,
-    # and the solver didn't already anchor its answer in visual observations.
-    if (not has_text_citations and text_was_retrieved
-            and text_is_substantive and text_is_relevant
-            and not solver_used_visual):
-        print("No text citations despite retrieved evidence — retrying with lower temperature...")
-        retry_kwargs = {**kwargs, 'temperature': 0.1}
-        return solver_step(state, model, processor, retry_kwargs)
-
-    # Retry if images exist but no observations/citations
-    has_image_citations = '[Question Image' in reasoning
-    images_were_passed = bool(
-        any(p for p in (state.image_paths or []) if p and os.path.exists(p))
-    )
-
-    if images_were_passed and not has_observations and not has_image_citations:
-        print("No image observations or citations — retrying with lower temperature...")
-        retry_kwargs = {**kwargs, 'temperature': 0.1}
-        return solver_step(state, model, processor, retry_kwargs)
-
-    return state
+    return solver_step(state, model, processor, kwargs)

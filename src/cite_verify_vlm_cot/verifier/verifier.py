@@ -2,7 +2,6 @@ import json
 import re
 
 import torch
-# from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from transformers import AutoProcessor
 from langgraph.graph import END, StateGraph
 from tracer import tracer
@@ -21,265 +20,12 @@ except ImportError:
 
 # Import State and step functions
 from utils import State
-from planner import planner_step
-from retriever import retriever_step
-from solver import solver_step, solver_step_with_citation_retry
-from citation_injector import inject_citations_step
-
-
-# VERIFIER_PROMPT_TEMPLATE = """
-# You are an expert reasoning verifier. Your job is to detect hallucinations in the solver's reasoning by examining actual images and text evidence.
-# QUESTION
-# {question}
-
-# ANSWER CHOICES
-# {choices}
-
-# SOLVER'S ANSWER
-# {solver_answer}
-
-# SOLVER'S REASONING
-# {solver_reasoning}
-
-# RETRIEVED TEXT EVIDENCE
-# {text_evidence}
-
-# QUESTION IMAGES (shown above in order)
-# {visual_evidence}
-
-# ---
-# CONFIDENCE CALIBRATION GUIDELINES:
-# - HIGH: Evidence directly and unambiguously supports the answer; citations exist and are correct.
-#   Default to HIGH when the answer is clearly supported by retrieved text.
-# - MEDIUM: Evidence partially supports the answer, or the answer relies on common knowledge.
-#   Use MEDIUM when citations are present but reasoning has minor gaps.
-# - LOW: No evidence was retrieved, citations are fabricated, or answer contradicts evidence.
-#   Reserve LOW for cases where you find MAJOR HALLUCINATIONS.
-
-# IMPORTANT: If the answer is factually correct and supported, output HIGH confidence.
-# Do NOT default to LOW just because the question is difficult.
-
-# YOUR TASK
-
-# Check if the solver's reasoning contains hallucinations (fabricated information) by examining the actual images above.
-
-# What counts as a HALLUCINATION?
-
-# 1. Fake Citations
-#    - Referencing [Text Evidence N] that doesn't exist (e.g., [Text Evidence 5] when only 3 exist)
-#    - Referencing [Question Image N] that doesn't exist (e.g., [Question Image 3] when only 1 image)
-
-# 2. Misrepresented Evidence
-#    - Claiming evidence says something it doesn't
-#    - Quoting evidence incorrectly
-#    - Distorting the meaning of evidence
-#    - Describing visual features not present in the actual images
-
-# 3. Fabricated Facts
-#    - Making specific claims not supported by evidence OR common knowledge
-#    - Inventing statistics, dates, or technical details
-
-# What is NOT a hallucination?
-
-# - Common knowledge (e.g., "water is wet", "mammals are warm-blooded")
-# - Obvious inferences (e.g., "since A>B and B>C, then A>C")
-# - Minor paraphrasing of evidence (as long as meaning is preserved)
-# - Semantic equivalences and restatements of the question itself.
-#   For example: "The question asks which question this experiment can answer"
-#   is identical in meaning to "Identify the question that the experiment can
-#   best answer" — these are NOT misrepresentations.  Do NOT flag a solver
-#   claim as a hallucination merely because it restates or paraphrases the
-#   question, the choices, or the task description in different words.
-# - Describing the experimental setup, apparatus, or procedure in ways that
-#   are consistent with the image, even if not verbatim from the evidence.
-# - Comparative and "also" claims: if the question asks "which animal ALSO does X",
-#   the solver only needs to show the chosen animal does X. It does NOT need to show
-#   that no other animal does X. Do NOT flag "Animal A does X" as a hallucination
-#   because "the text doesn't say Animal A is the only one that does X."
-# - Multi-image questions: before checking any claim, identify WHICH specific animal,
-#   object, or subject the question is asking about. Only evaluate claims about that
-#   subject — do not reject the answer because a different object in the image has
-#   different properties.
-# - Partial evidence support: if the solver's conclusion is consistent with common
-#   knowledge AND the retrieved text provides supporting context (even indirect),
-#   treat this as VERIFIED. Only REJECT when a claim directly contradicts the
-#   retrieved text or cites a non-existent source.
-
-# Before verifying, identify:
-# Subject of question: [the specific thing being asked about]
-# Claim to verify: [the solver's specific answer claim]
-
-# Then check only whether that specific claim contains hallucinations.
-
-# ---
-# OUTPUT FORMAT
-
-# Provide your verification in EXACTLY this format:
-
-# Hallucination Check: [NONE DETECTED] or [MINOR HALLUCINATIONS] or [MAJOR HALLUCINATIONS]
-
-# [If hallucinations detected, list each one:]
-# Claim: "[exact quote from solver]"
-# Issue: [fake citation / not in evidence / misrepresented / fabricated]
-# Evidence: [what you actually see in the image/text, or "doesn't exist"]
-
-# [If no hallucinations:]
-# All claims properly supported by evidence or common knowledge
-
-# Final Verdict: [VERIFIED] or [REJECTED]
-
-# Confidence: [HIGH] or [MEDIUM] or [LOW]
-
-# Verified Answer: [A/B/C/D/E or INCONCLUSIVE]
-
-# Now verify the solver's reasoning above using this exact format.
-# """
-
-VERIFIER_PROMPT_TEMPLATE = """
-You are a strict fact-checker. Your ONLY job: does the evidence actually support the solver's claims?
-
-QUESTION
-{question}
-
-ANSWER CHOICES
-{choices}
-
-SOLVER'S ANSWER
-{solver_answer}
-
-SOLVER'S REASONING
-{solver_reasoning}
-
-RETRIEVED TEXT EVIDENCE
-{text_evidence}
-
-QUESTION IMAGES (shown above in order)
-{visual_evidence}
-
----
-TASK: Verify whether the solver's reasoning is hallucination-free using the following
-structured chain-of-thought. Work through each step in order — do not skip steps.
-
-STEP 1 — IDENTIFY THE KEY CLAIM
-State the single most important factual claim the solver makes to reach its answer.
-Key claim: [one sentence]
-
-STEP 2 — LOCATE SUPPORTING EVIDENCE
-For each citation used anywhere in the solver's reasoning, quote what the evidence actually says.
-- [Text Evidence N] says: "[exact relevant quote or 'does not exist']"
-- [Question Image N] shows: "[what you actually see, or 'not visible']"
-
-STEP 3 — CHECK EACH CITATION
-For every citation in the solver's reasoning (not just the key claim):
-- Does [Text Evidence N] contain the stated fact? YES / NO / PARTIALLY
-- Does [Question Image N] actually show what is described? YES / NO / PARTIALLY
-List any mismatch as a candidate hallucination.
-
-STEP 4 — CLASSIFY HALLUCINATIONS
-Based on Step 3, classify:
-- NONE DETECTED: all citations check out; any uncited claims are common knowledge or logical inference
-- MINOR HALLUCINATIONS: citation slightly misrepresents evidence but conclusion is still plausible
-- MAJOR HALLUCINATIONS: citation is fabricated, contradicts evidence, or conclusion depends on a false claim
-
-STEP 5 — RENDER VERDICT
-Given the hallucination classification, decide:
-- VERIFIED: the solver's answer is well-supported and hallucination-free (or only minor)
-- REJECTED: the solver's answer depends on a major hallucination
-
----
-OUTPUT FORMAT (use EXACTLY this format after completing the steps above):
-
-Hallucination Check: [NONE DETECTED] or [MINOR HALLUCINATIONS] or [MAJOR HALLUCINATIONS]
-
-[If hallucinations detected, list each one:]
-Claim: "[exact quote from solver]"
-Issue: [fake citation / not in evidence / misrepresented / fabricated]
-Evidence: [what the evidence actually says, or "doesn't exist"]
-
-[If no hallucinations:]
-All claims properly supported by evidence or common knowledge.
-
-Final Verdict: [VERIFIED] or [REJECTED]
-
-Confidence: [HIGH] or [MEDIUM] or [LOW]
-
-Verified Answer: [copy the answer letter here — see rule below]
-
-VERIFIED ANSWER RULE (mandatory):
-- If Final Verdict is VERIFIED → copy the letter from SOLVER'S ANSWER (e.g. if solver said "The answer is B", write: Verified Answer: B)
-- If Final Verdict is REJECTED and you know the correct answer → write that letter (e.g. Verified Answer: C)
-- If Final Verdict is REJECTED and you cannot determine the correct answer → write: Verified Answer: INCONCLUSIVE
-
-EXAMPLE — do not copy, just follow the pattern:
-  SOLVER'S ANSWER: The answer is B: Container B has higher concentration
-  Final Verdict: [VERIFIED]
-  Confidence: [HIGH]
-  Verified Answer: B       ← copied from solver since VERIFIED
-"""
-
-# VERIFIER_PROMPT_TEMPLATE = """
-# You are a strict fact-checker. Your ONLY job: does the evidence actually support the solver's claims?
-
-# QUESTION
-# {question}
-
-# ANSWER CHOICES
-# {choices}
-
-# SOLVER'S ANSWER
-# {solver_answer}
-
-# SOLVER'S REASONING
-# {solver_reasoning}
-
-# RETRIEVED TEXT EVIDENCE
-# {text_evidence}
-
-# QUESTION IMAGES (shown above in order)
-# {visual_evidence}
-
-# ---
-# TASK: Check each factual claim in the solver's reasoning.
-
-# A claim is SUPPORTED if:
-# - A specific [Text Evidence N] contains the stated fact, OR
-# - A [Question Image N] visually shows what is described
-
-# A claim is a HALLUCINATION if:
-# - It cites [Text Evidence N] but that evidence says something different or unrelated
-# - It cites [Text Evidence N] or [Question Image N] that does not exist
-# - It describes image details not visible in the actual image
-# - It makes specific factual assertions with no evidence
-
-# What is NOT a hallucination:
-# - Obvious logical inferences (e.g., "since A>B and B>C, then A>C")
-# - Paraphrasing or restating the question/choices in different words
-
-# Before verifying, identify:
-# Subject of question: [the specific thing being asked about]
-# Claim to verify: [the solver's specific answer claim]
-
-# Then check only whether that specific claim contains hallucinations.
-
-# ---
-# OUTPUT FORMAT (use EXACTLY this format):
-
-# Hallucination Check: [NONE DETECTED] or [MINOR HALLUCINATIONS] or [MAJOR HALLUCINATIONS]
-
-# [If hallucinations detected, list each one:]
-# Claim: "[exact quote from solver]"
-# Issue: [fake citation / not in evidence / misrepresented / fabricated]
-# Evidence: [what the evidence actually says, or "doesn't exist"]
-
-# [If no hallucinations:]
-# All claims properly supported by evidence or common knowledge.
-
-# Final Verdict: [VERIFIED] or [REJECTED]
-
-# Confidence: [HIGH] or [MEDIUM] or [LOW]
-
-# Verified Answer: [A/B/C/D/E or INCONCLUSIVE]
-# """
+from extractor.planner import planner_step
+from retriever.retriever import retriever_step, BM25Retriever, text_to_embedding, rerank_with_cross_encoder
+from solver.solver import solver_step, solver_step_with_citation_retry
+from citation_injector.citation_injector import inject_citations_step, _build_text_chunk_list
+from prompts import VERIFIER_PROMPT_TEMPLATE
+from functools import partial
 
 def extract_topic_from_claim(claim: str) -> str:
     """Extract the topic being discussed from a claim"""
@@ -464,30 +210,6 @@ def prepare_images_for_verifier(state):
             except Exception as e:
                 print(f"Warning: Could not load image {img_path}: {e}")
     print(f"Verifier: Prepared {len(image_sources)} question images (max allowed: {MAX_IMAGES})")
-
-    # Retrieved image ROIs: use base64 (already stored in roi.image_patch or cache)
-    # all_image_rois = []
-    # if state.retrieved_chunks and len(image_sources) < MAX_IMAGES:
-    #     for query, chunk_info in state.retrieved_chunks.items():
-    #         # chunk_info is a ChunkInfo Pydantic model - use attribute access
-    #         all_image_rois.extend(chunk_info.image_rois)
-    # for idx, roi in enumerate(all_image_rois):
-    #     if len(image_sources) >= MAX_IMAGES:
-    #         print(f"Warning: Reached max {MAX_IMAGES} images, skipping remaining ROIs")
-    #         break
-
-    #     try:
-    #         # roi is a RoiInfo Pydantic model - use attribute access.
-    #         # Resolve patch from cache if not embedded directly on the ROI.
-    #         patch = roi.image_patch or state.image_patch_cache.get(roi.roi_id, "")
-    #         if patch:
-    #             image_sources.append("data:image/png;base64," + patch)
-    #             caption = roi.caption if roi.caption else 'No caption'
-    #             descriptions.append(f"[Image ROI {idx+1}]: {caption}")
-    #     except Exception as e:
-    #         print(f"Warning: Could not load ROI image {idx}: {e}")
-    
-    # print(f"Verifier: Prepared {len(image_sources)} images for processing (max allowed: {MAX_IMAGES})")
     return image_sources, descriptions
 
 def verifier_step(state: State, model, processor) -> State:
@@ -510,7 +232,6 @@ def verifier_step(state: State, model, processor) -> State:
         # Build the evidence list via the canonical helper so [Text Evidence N]
         # labels seen by the verifier are identical to what the solver was shown
         # and what citation_injector used for injection.
-        from citation_injector import _build_text_chunk_list
         all_text_chunks = _build_text_chunk_list(
             state.retrieved_chunks, total_cap=15, truncate=500
         )
@@ -553,8 +274,6 @@ def verifier_step(state: State, model, processor) -> State:
             visual_evidence=visual_evidence,
             solver_answer=state.final_answer
         )
-
-        # messages = [{"role": "user", "content": prompt}]
 
         # Log input attributes
         verifier_span.set_attribute("verifier.question", state.question)
@@ -924,12 +643,6 @@ def build_cave_vlm_cot_graph(
     ROI retrieval has been removed. Question images are passed directly to the
     solver via state.image_paths and cited as [Question Image N].
     """
-    from functools import partial
-    from retriever import (
-        BM25Retriever,
-        text_to_embedding,
-        rerank_with_cross_encoder,
-    )
 
     # Create partial functions with models/parameters bound
     planner_node = partial(
@@ -953,9 +666,11 @@ def build_cave_vlm_cot_graph(
         kwargs=solver_kwargs,
     )
 
-    verifier_node = partial(
-        verifier_step, model=verifier_model, processor=verifier_processor
-    )
+    # verifier_node = partial(
+    #     verifier_step, model=verifier_model, processor=verifier_processor
+    # )
+
+    verifier_node = _conditional_verifier_step(verifier_model, verifier_processor)
 
     # Build the graph
     graph = StateGraph(State)

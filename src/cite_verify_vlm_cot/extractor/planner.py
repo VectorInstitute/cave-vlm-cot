@@ -1,16 +1,13 @@
 """
-This is planner.py — the first node in the pipeline. 
-Its job is to turn a raw multiple-choice question into a list of search queries that the retriever will use to find evidence.
-Input: a State object containing the question, answer choices, and optionally image captions/OCR text.
-Output: state.subqueries — a list of up to 8 search query strings.
+planner.py
+----------
+First node in the pipeline. Turns a raw multiple-choice question into a list
+of search queries for the retriever.
+Input:  State (question, choices, optional image captions/OCR)
+Output: state.subqueries — up to 8 search query strings
 """
-
-# import ast
 import json
-# import math
 from typing import Dict, List, Optional
-
-# import pandas as pd
 import torch
 from evaluations import planner_coverage_score, planner_specificity_score
 import re
@@ -18,6 +15,7 @@ import re
 # CLIPProcessor handles image pre-processing like resizing and normalization
 from tracer import tracer
 from utils import State
+from prompts import PLANNER_PROMPT_TEMPLATE
 
 # Enable only the safe fallback backend
 torch.backends.cuda.enable_flash_sdp(False)
@@ -27,204 +25,6 @@ torch.backends.cuda.enable_math_sdp(True)
 # PyTorch provides multiple implementations of this, called backends (FlashAttention, SDPA(default), Math)
 # SDPA is fast but allocates large temporary buffers, especially bad for long sequences + big models
 # Prefer FlashAttention (best) if your GPU supports it
-
-# df = pd.read_csv("scienceqa_augmented.csv")
-# states = []
-
-# for idx, row in df.iterrows():
-#     pid = safe_str(row.get("pid"))
-#     question = safe_str(row.get("question"))
-#     hint = safe_str(row.get("hint"))
-#     lecture = safe_str(row.get("lecture"))
-#     subject = safe_str(row.get("subject"))
-#     topic = safe_str(row.get("topic"))
-#     skill = safe_str(row.get("skill"))
-#     category = safe_str(row.get("category"))
-
-#     # Parse image_paths (JSON array)
-#     image_paths = safe_parse_json(row.get("image_paths"), default=[])
-#     if not isinstance(image_paths, list):
-#         image_paths = []
-
-#     # Parse choices (JSON array or string representation)
-#     choices_raw = row.get("choices")
-#     if isinstance(choices_raw, str):
-#         choices = safe_parse_json(choices_raw, default=[])
-#     else:
-#         choices = choices_raw if choices_raw else []
-
-#     # Parse answer
-#     answer = int(row["answer"]) if pd.notna(row.get("answer")) else -1
-
-#     # Parse img_captions and img_ocr (JSON objects)
-#     img_captions = safe_parse_json(row.get("img_captions"), default={})
-#     img_ocr = safe_parse_json(row.get("img_ocr"), default={})
-
-#     # Build image context from captions and OCR
-#     image_context_parts = []
-#     if img_captions:
-#         captions_text = "\n".join([f"{k}: {v}" for k, v in img_captions.items()])
-#         image_context_parts.append(f"Image Captions:\n{captions_text}")
-
-#     if img_ocr:
-#         ocr_text = "\n".join([f"{k}: {v}" for k, v in img_ocr.items()])
-#         image_context_parts.append(f"OCR Text:\n{ocr_text}")
-
-#     image_context = "\n\n".join(image_context_parts) if image_context_parts else ""
-
-#     # Determine gold answer
-#     gold_answer = choices[answer] if 0 <= answer < len(choices) else ""
-
-#     state = State(
-#         pid=pid,
-#         question=question,
-#         hint=hint,
-#         image_paths=image_paths,
-#         lecture=lecture,
-#         choices=choices,
-#         answer=answer,
-#         img_captions=img_captions,
-#         img_ocr=img_ocr,
-#         subqueries=[],
-#         retrieved_chunks={},
-#         reasoning_steps=[],
-#         final_answer="",
-#         verdict="",
-#         gold_answer=gold_answer,
-#         subject=subject,
-#         topic=topic,
-#         skill=skill,
-#         category=category
-#     )
-
-#     states.append(state)
-
-# print(f"Loaded {len(states)} states from CSV")
-
-# # Print first state
-# if states:
-#     print("\nFirst state:")
-#     print(f"  PID: {states[0].pid}")
-#     print(f"  Question: {states[0].question[:100]}...")
-#     print(f"  Image paths: {states[0].image_paths}")
-#     print(f"  Choices: {states[0].choices}")
-#     print(f"  Gold answer: {states[0].gold_answer}")
-
-# PLANNER_PROMPT_TEMPLATE = """Generate search queries to help answer a question.
-
-# Example 1:
-# Question: Which state is farthest north?
-# Choices: ["Texas", "Maine", "Florida"]
-# Queries:
-# 1. Maine latitude coordinates
-# 2. Texas geographic location
-# 3. northernmost US states list
-# 4. state latitude comparison
-
-# Example 2:
-# Question: What tense is used? "She will dance tomorrow."
-# Choices: ["past", "present", "future"]
-# Queries:
-# 1. future tense definition grammar
-# 2. will auxiliary verb tense
-# 3. English verb tenses examples
-# 4. identifying future tense sentences
-
-# Example 3:
-# Question: Is this a physical or chemical change? Burning wood.
-# Choices: ["physical change", "chemical change"]
-# Queries:
-# 1. burning wood chemical reaction
-# 2. physical vs chemical change examples
-# 3. combustion change type
-# 4. irreversible changes chemistry
-
-# Now generate queries:
-# Question: {question}
-# Choices: {choices}
-# {image_context}
-# Queries:
-# 1."""
-
-
-# Prompt template
-# The few-shot examples are in JSON format so the model learns the required
-# output structure from the examples themselves.
-
-# Design principles:
-#   1. ONLY question + choices + image-context in the live prompt.
-#      Hint, lecture, subject, topic live in the KB and are surfaced via
-#      well-phrased queries, not privileged context injection.
-#   2. Three query families per example: definitional, choice-specific,
-#      comparative — these cover the main KB document types.
-#   3. No metadata (Subject, Hint, Lecture) in the examples.
-
-PLANNER_PROMPT_TEMPLATE = """Generate search queries to retrieve the evidence needed to answer a multiple-choice question.
-Your queries will be run against a knowledge base AND a web search engine.
-
-Good queries retrieve:
-  - definitions and explanations of key concepts in the question
-  - facts specific to each answer choice that distinguish it from the others
-  - background knowledge relevant to the topic being tested
-
-OUTPUT FORMAT: a JSON array of query strings — nothing else.
-Each query: 3-12 words, plain keywords or short phrases, no question marks.
-Cover at least one conceptual/definitional query AND one query per distinct answer choice.
-
----
-Example 1 — comparative / geographic:
-Question: Which of these states is farthest north?
-Choices: ["West Virginia", "Louisiana", "Arizona", "Oklahoma"]
-[
-  "West Virginia latitude geographic location northern United States",
-  "Louisiana latitude southern United States position",
-  "Arizona geographic coordinates latitude north",
-  "Oklahoma latitude map northern states",
-  "US states latitude ranking northernmost comparison",
-  "latitude West Virginia Louisiana Arizona Oklahoma"
-]
-
----
-Example 2 — grammar / conceptual:
-Question: What tense is used in this sentence? "She will dance tomorrow."
-Choices: ["past tense", "present tense", "future tense"]
-[
-  "future tense definition will auxiliary verb grammar",
-  "past tense definition examples English grammar",
-  "present tense definition form examples",
-  "identify verb tense in a sentence",
-  "will auxiliary verb future tense indicator"
-]
-
----
-Example 3 — physical science / classification:
-Question: Is a scarf a solid or a liquid?
-Choices: ["a solid", "a liquid"]
-[
-  "solid state matter definition definite shape volume",
-  "liquid state matter definition flow takes container shape",
-  "scarf fabric material solid liquid classification",
-  "states of matter everyday objects examples classify",
-  "solid vs liquid properties differences comparison"
-]
-
----
-Example 4 — language / capitalization:
-Question: Which correctly shows the title of a play?
-Choices: ["A breath of Fresh Air", "A Breath of Fresh Air"]
-[
-  "title case capitalization rules books plays movies",
-  "capitalize major words in a title grammar rule",
-  "title capitalization which words capitalized English",
-  "correct title formatting capitalize each word",
-  "title capitalization articles prepositions rules"
-]
-
----
-Now generate queries for this question.
-Question: {question}
-Choices: {choices}
-{image_context}["""
 
 # JSON parsing + structural validation
 def _is_valid_query(candidate: str, question: str) -> bool:

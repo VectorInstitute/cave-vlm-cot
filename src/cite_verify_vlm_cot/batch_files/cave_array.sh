@@ -18,12 +18,12 @@
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
-#SBATCH --gres=gpu:a40:3                  # 3 A100s per task (planner/solver/verifier)
+#SBATCH --gres=gpu:a100:3                  # 3 A100s per task (planner/solver/verifier)
 #SBATCH --mem=120G
-#SBATCH --time=4-00:00:00             # 3 days — comfortably covers 1 shard
+#SBATCH --time=2-00:00:00             # 3 days — comfortably covers 1 shard
 #SBATCH --chdir=/h/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
-#SBATCH --output=/h/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_shard_%a.out
-#SBATCH --error=/h/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_shard_%a.err
+#SBATCH --output=/h/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_shard_%j_%a.out
+#SBATCH --error=/h/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_shard_%j_%a.err
 
 # Environment
 mkdir -p /h/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs
