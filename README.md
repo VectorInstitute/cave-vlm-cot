@@ -174,15 +174,15 @@ All pipeline stages emit OpenTelemetry spans to Arize Phoenix via `BatchSpanProc
 
 ---
 
-## Results (n = 1,000, ScienceQA)
+## Results (n = 5,000, ScienceQA)
 
 | Metric | Score |
 |---|---|
-| Accuracy | 0.787 |
-| CaVeScore | 0.671 |
-| Citation precision | 0.685 |
-| Citation recall | 0.657 |
-| AIS | 0.627 |
-| Hallucination rate | 0.373 |
-| Planner hit rate | 0.645 |
-| QI citation coverage | 0.797 |
+| Accuracy | 0.775 |
+| CaVeScore | 0.662 |
+| Citation precision | 0.676 |
+| Citation recall | 0.626 |
+| AIS | 0.619 |
+| Hallucination rate | 0.381 |
+| Planner hit rate | 0.632 |
+<!-- | QI citation coverage | 0.797 | -->
