@@ -623,14 +623,11 @@ def build_cave_vlm_cot_graph(
     verifier_model,
     verifier_processor,
     retrieval_k=5,
-    # Kept for backward compatibility but no longer used for retrieval:
-    image_index=None,
-    roi_metadata=None,
 ):
     """
     Build the complete CaVe-VLM-CoT graph with all dependencies.
     Returns a compiled graph that can be invoked with just a State object.
-    ROI retrieval has been removed. Question images are passed directly to the
+    Question images are passed directly to the
     solver via state.image_paths and cited as [Question Image N].
     """
 
