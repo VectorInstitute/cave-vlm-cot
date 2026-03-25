@@ -139,16 +139,21 @@ def parse_planner_output(raw_output: str, question: str) -> List[str]:
 
 # Choice-discriminating query generator (deterministic, KB-agnostic)
 _STOP_WORDS = {
+    # current set
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'what', 'which',
     'how', 'this', 'that', 'does', 'do', 'will', 'can', 'be', 'been',
     'of', 'in', 'on', 'at', 'to', 'for', 'and', 'or',
+    # additions that actually appear in ScienceQA question stems
+    'has', 'have', 'had', 'not', 'from', 'with', 'would', 'could',
+    'should', 'may', 'when', 'where', 'who', 'why', 'if', 'it',
+    'its', 'they', 'them', 'their', 'most', 'some', 'each',
+    'identify', 'following', 'best', 'describes', 'called',
 }
 
 
 def generate_choice_queries(question: str, choices: List[str]) -> List[str]:
     """
     Generate one targeted retrieval query per answer choice.
-
     Built from question text and choice labels only — no metadata.
     Queries are phrased to match KB documents and web snippets about each
     specific choice, enabling discrimination between options.
@@ -216,27 +221,23 @@ def queries_from_hallucination_feedback(
 
 # Fallback: generate queries when LLM parsing yields nothing usable
 def generate_fallback_queries(question: str, choices: List[str]) -> List[str]:
-    """
-    Deterministic fallback when the LLM produces no parseable output.
-    Uses question keywords and choice labels to construct minimal queries.
-    """
     queries = []
 
+    # Question-level anchor query (not produced by generate_choice_queries)
     q_words = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
     key_terms = [w for w in q_words if w not in _STOP_WORDS][:5]
-
     if len(key_terms) >= 2:
         queries.append(f"{' '.join(key_terms[:3])} definition")
 
-    for choice in choices[:4]:
-        choice_clean = str(choice).strip().lower()
-        if len(choice_clean) > 3 and choice_clean not in ('yes', 'no', 'true', 'false'):
-            queries.append(f"{choice_clean} definition")
-            if len(queries) < 6:
-                queries.append(f"{choice_clean} examples")
+    # Reuse choice query logic rather than duplicating it
+    choice_queries = generate_choice_queries(question, choices)
+    seen = {q.lower() for q in queries}
+    for q in choice_queries:
+        if q.lower() not in seen:
+            seen.add(q.lower())
+            queries.append(q)
 
     return [q for q in queries if _is_valid_query(q, question)][:6]
-
 
 # Main planner step
 def planner_step(state: State, model, tokenizer, kwargs) -> State:
@@ -320,9 +321,6 @@ def planner_step(state: State, model, tokenizer, kwargs) -> State:
             with torch.no_grad():
                 outputs = model.generate(**inputs, **kwargs)
 
-            # The model continues from "[" — prepend it so the parser sees a
-            # complete JSON array regardless of whether the model echoes the
-            # opening bracket.
             raw_decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 
             # Extract the assistant turn (everything after the prompt)
