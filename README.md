@@ -198,4 +198,4 @@ All pipeline stages emit OpenTelemetry spans to Arize Phoenix via `BatchSpanProc
 5. the-art-of-rag-part-3-reranking-with-cross-encoders-688a16b64669
 6. https://medium.com/@aishikbhattacharjee98/6. reranking-using-cross-encoder-boost-your-rag-pipeline-accuracy-d2da22006dad
 8. https://medium.com/@abheshith7/9.mastering-reranking-in-rag-from-basic-retrieval-to-advanced-methods-db297530361a
-https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct 
+9. https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct 
