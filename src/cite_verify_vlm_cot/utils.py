@@ -114,7 +114,8 @@ def safe_parse_json(x, default=None):
             return default if default is not None else {}
 
 def build_text_index(csv_path: str = "scienceqa_augmented.csv"):
-    """Build the text FAISS index from the ScienceQA KB.
+    """
+    Build the text FAISS index from the ScienceQA KB.
     Question images are passed directly to the solver at inference time
     and are not indexed here.
     """
@@ -168,9 +169,7 @@ def build_text_index(csv_path: str = "scienceqa_augmented.csv"):
 
     # Build TEXT index — filter first, then reset index so FAISS row numbers
     # correspond directly to text_data.iloc[i], matching hybrid_retrieval's
-    # expectation.  Building from the full interleaved `data` would misalign
-    # FAISS positions with DataFrame rows the moment image rows are present.
-
+    # expectation.
     text_data = data[data["media_type"] == "text"].reset_index(drop=True)
     if len(text_data):
         text_vectors = np.vstack(text_data["embeddings"].values).astype(np.float32)
