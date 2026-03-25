@@ -15,32 +15,16 @@ corrects the stated letter to match what the reasoning actually supports.
 Design evolution of image handling:
   Early versions / LLaVA-CoT (Xkev/Llama-3.2V-11B-cot):
     Passed both question images AND retrieved image ROI patches to the VLM,
-    labelled [Image ROI N]. The ROI filter
-    `roi.source_image not in question_image_set` silently discarded all
-    externally-retrieved ROIs before the model saw them, making [Image ROI N]
-    citations impossible. The entire visual-evidence / ROI pipeline was removed
+    labelled [Image ROI N].
+    The entire visual-evidence / ROI pipeline was removed
     in favour of the simpler approach: pass only question images, labelled
     [Question Image N].
+    
     Llama-3.2-Vision (MLlama) requires image tokens embedded in the message
     content — passing images=... to the processor alone is not enough; the text
     must contain exactly one <|image|> placeholder per image. This is why
     solver_step builds a multimodal content_parts list and lets
     apply_chat_template insert the tokens, rather than embedding them manually.
-
-  InternVL2.5-8B branch (experimental, not merged to main):
-    Tried as a drop-in replacement for LLaVA-CoT due to better structured-output
-    and citation-following capability. Key API differences from LLaVA-CoT:
-    - Uses model.chat() instead of processor.apply_chat_template + generate
-    - Images passed as PIL objects with <image> tags inline in the prompt string
-    - Requires AutoTokenizer (not AutoProcessor)
-    - Returns a response string directly — no "assistant" boundary splitting
-    - Dynamic-resolution preprocessing: images are tiled into 448×448 patches
-      (via dynamic_preprocess / build_transform / load_image_for_internvl) to
-      preserve aspect ratio rather than forcing a fixed resize. A wide image
-      becomes 2×1 patches, a tall image 1×2, etc.
-    - MAX_TOTAL_IMAGES raised from 2 → 4 because InternVL handles multi-image
-      context more reliably than LLaVA-CoT.
-    Branch was not ultimately merged; current solver targets LLaVA-CoT API.
 
   Dual prompt templates introduced: text-only questions use
   SOLVER_PROMPT_TEMPLATE (no OBSERVATIONS section); image questions use
@@ -52,6 +36,7 @@ model.get('field') → AttributeError
 'field' in model → Wrong behavior
 model.field → Correct!
 """
+
 import gc
 import re
 from typing import List, Tuple
@@ -142,7 +127,7 @@ def _build_prompt(question_text, answer_choices, image_evidence, text_evidence, 
       "From domain knowledge" for every step.
     - Image (SOLVER_PROMPT_TEMPLATE_IMAGE): adds a mandatory OBSERVATIONS section
       so the VLM explicitly describes visual content before reasoning, reducing the
-      "reasoning says B but conclusion says A" flip.  Includes a worked example
+      "reasoning says B but conclusion says A" flip. Includes a worked example
       (do-not-copy framing) to anchor citation format without inducing copying.
     """
     if has_images:
@@ -168,14 +153,7 @@ def check_answer_consistency(
 ) -> Tuple[bool, str]:
     """
     Use cross-encoder to verify reasoning supports the stated answer.
-    
-    Supersedes validate_and_correct_answer (used in early LLaVA-CoT and InternVL
-    branches), which did a text-match correction: it parsed the stated letter and
-    choice text from the conclusion, then checked whether the stated text appeared
-    in choices[idx]. On mismatch it searched all choices for keyword overlap and
-    corrected the letter. This was fast but brittle — it relied on the conclusion
-    text being well-formed and failed silently on paraphrased or partial matches.
-    The cross-encoder approach here scores all choices against the full reasoning
+    The approach scores all choices against the full reasoning
     block, making it robust to wording variation and able to catch cases where the
     conclusion letter is plausible-sounding but contradicted by the reasoning.
 
@@ -355,14 +333,10 @@ def solver_step(state: State, model, processor, kwargs) -> State:
         # or relying on processor(images=...) without the content dicts produces
         # mismatched cross-attention and garbled output.
 
-        # Llama-3.2-Vision (MLlama) requires image tokens embedded in the message
-        # content. Passing images=... to processor alone is not enough — the text
-        # must contain exactly one <|image|> placeholder per image. The correct way
-        # is to build a multimodal content list so apply_chat_template inserts them.
-
         # For VLM, describe retrieved images as text captions in the prompt.
         # Do NOT inject <|image|> tokens manually here — the processor inserts them
-        # when images are passed to processor(images=..., text=...).
+        # when images are passed to processor(images=..., text=...)
+
         if images:
             # Each image becomes a {"type": "image"} dict; text follows at the end.
             content_parts = [{"type": "image"} for _ in images]
@@ -429,7 +403,7 @@ def solver_step(state: State, model, processor, kwargs) -> State:
             print(f"  Citations: {len(text_cites)} text, {len(image_cites)} image "
                   f"({'cited' if image_cites else 'not cited'})")            
             if images and not image_cites and not has_observations:
-                print(f"  [DEBUG] Image passed but not cited. Full output:\n{full_output}\n{'='*60}")
+                print(f"  [DEBUG] Image passed but not cited. Full output:\n{full_output}\n")
             
             vlm_span.set_attribute("llm.output", full_output[:2000])
         
