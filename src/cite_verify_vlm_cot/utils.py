@@ -5,28 +5,22 @@ Pydantic state models, shared utilities, and FAISS index construction
 for the CaVe-VLM-CoT retrieval pipeline.
 """
 import ast
-import base64
 import gc
 import json
 import math
 import os
-import pickle
-from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 import faiss
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
 from pydantic import BaseModel
 
 # Constants
 DEFAULT_CSV_PATH = "scienceqa_augmented.csv"
 MAX_ROWS = 5000
 TEXT_INDEX_PATH = "text_index.faiss"
-IMAGE_INDEX_PATH = "full_image_index.faiss"
-IMAGE_METADATA_PATH = "image_metadata.pkl"
 EMBEDDINGS_CSV_PATH = "multimodal_embeddings.csv"
 
 # Ordered list of text fields used to build a document's text representation.
@@ -119,15 +113,17 @@ def safe_parse_json(x, default=None):
         except (ValueError, SyntaxError):
             return default if default is not None else {}
 
-def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
-    """Build indexes storing FULL IMAGES instead of ROI patches."""
-    from retriever.retriever import image_embedding, text_to_embedding
+def build_text_index(csv_path: str = "scienceqa_augmented.csv"):
+    """Build the text FAISS index from the ScienceQA KB.
+    Question images are passed directly to the solver at inference time
+    and are not indexed here.
+    """
+    from retriever.retriever import text_to_embedding
 
     df = pd.read_csv(csv_path)
     df = df.iloc[:5000]
     
     data = pd.DataFrame()
-    image_metadata = []
 
     for idx, row in df.iterrows():
         # TEXT INDEXING
@@ -153,53 +149,11 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
         }
         data = pd.concat([data, pd.DataFrame([text_row])], ignore_index=True)
 
-        # IMAGE INDEXING - Store full image
-        image_paths = safe_parse_json(row.get("image_paths"), default=[])
-        img_captions = safe_parse_json(row.get("img_captions"), default={})
-
-        for image_path in image_paths:
-            if not image_path or not os.path.exists(image_path):
-                continue
-
-            img_filename = os.path.basename(image_path)
-            img_caption = img_captions.get(img_filename, "")
-
-            img_pil = Image.open(image_path).convert("RGB")
-            img_embedding = image_embedding(img_pil)
-            
-            buffered = BytesIO()
-            img_pil.save(buffered, format="PNG")
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-            image_metadata.append({
-                "image_id": f"{row.get('pid')}_{img_filename}",
-                "source_path": image_path,
-                "image_base64": img_base64,
-                "caption": img_caption,
-                "subject": subject,
-                "topic": topic,
-                "pid": str(row.get("pid", "")),
-            })
-
-            data = pd.concat([data, pd.DataFrame([{
-                "media_type": "image",
-                "image_id": f"{row.get('pid')}_{img_filename}",
-                "source_image": image_path,
-                "text": img_caption,
-                "embeddings": img_embedding[0].tolist(),
-                "subject": subject,
-                "topic": topic,
-            }])], ignore_index=True)
-
         torch.cuda.empty_cache()
         gc.collect()
 
-    # Save metadata
     _out_dir = os.path.expanduser("~/outputs")
     os.makedirs(_out_dir, exist_ok=True)
-    with open(os.path.join(_out_dir, "image_metadata.pkl"), "wb") as f:
-        pickle.dump(image_metadata, f)
-    print(f"Saved {len(image_metadata)} full image metadata entries")
 
     # Save the embeddings DataFrame so experiments.py can load it as `data`.
     # Without this, experiments.py crashes with FileNotFoundError on every run
@@ -217,7 +171,6 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
     # expectation.  Building from the full interleaved `data` would misalign
     # FAISS positions with DataFrame rows the moment image rows are present.
 
-    # Maintain separate FAISS indexes for text and image
     text_data = data[data["media_type"] == "text"].reset_index(drop=True)
     if len(text_data):
         text_vectors = np.vstack(text_data["embeddings"].values).astype(np.float32)
@@ -226,17 +179,7 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
         faiss.write_index(text_index, os.path.join(_out_dir, "text_index.faiss"))
         print(f"Text index: {len(text_data)} entries")
 
-    # Build IMAGE index (full images)
-    image_data = data[data["media_type"] == "image"]
-    if len(image_data):
-        image_vectors = np.vstack(image_data["embeddings"].values).astype(np.float32)
-        image_index = faiss.IndexFlatIP(image_vectors.shape[1])
-        image_index.add(image_vectors)
-        faiss.write_index(image_index, os.path.join(_out_dir, "full_image_index.faiss"))
-        print(f"Full image index: {len(image_data)} entries")
-
     print(f"\nINDEX SUMMARY:")
     print(f"  Text entries: {len(text_data)}")
-    print(f"  Full images:  {len(image_metadata)}")
 
-    return data, image_metadata
+    return data
