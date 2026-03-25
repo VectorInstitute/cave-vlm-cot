@@ -266,34 +266,6 @@ def eval_num_question_images(output: dict) -> int:
         return 0
     return output.get("num_question_images", 0)
 
-# Image ROI Evaluators
-# def eval_image_roi_precision(output: dict) -> float:
-#     """What fraction of retrieved ROIs are from the question's images?"""
-#     if output is None:
-#         return 0.0
-#     val = output.get("image_roi_precision")   # None (not -1) means no images
-#     return val if val is not None else 0.0
-
-# def eval_image_roi_recall(output: dict) -> float:
-#     """What fraction of question images have ROIs retrieved?"""
-#     if output is None:
-#         return 0.0
-#     val = output.get("image_roi_recall")
-#     return val if val is not None else 0.0
-
-# def eval_image_roi_mrr(output: dict) -> float:
-#     """MRR for image ROI retrieval."""
-#     if output is None:
-#         return 0.0
-#     val = output.get("image_roi_mrr")
-#     return val if val is not None else 0.0
-
-# def eval_total_rois(output: dict) -> int:
-#     """Total number of ROIs retrieved."""
-#     if output is None:
-#         return 0
-#     return output.get("total_rois_retrieved", 0)
-
 # Solver evaluators (extract pre-computed values from output dict)
 def eval_cave_score(output: dict) -> float:
     """Extract pre-computed CaVeScore."""
@@ -428,9 +400,9 @@ def _index_needs_rebuild(expected_rows: int) -> bool:
     return False
 num_text_rows = len(df)  # rough lower bound; actual text rows = 1 per CSV row
 if _index_needs_rebuild(num_text_rows):
-    from utils import build_full_image_indexes
+    from utils import build_text_index
     print("Building indexes (first run or stale index)...")
-    build_full_image_indexes("scienceqa_augmented.csv")
+    build_text_index("scienceqa_augmented.csv")
     print("Indexes built!")
 
 # Load pre-built search indexes for fast retrieval
