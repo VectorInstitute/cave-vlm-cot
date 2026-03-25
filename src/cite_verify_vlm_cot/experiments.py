@@ -26,6 +26,9 @@ import faiss
 # Data processing
 import pandas as pd
 
+import traceback
+from opentelemetry import trace as otel_trace
+
 # Set environment variables before any model/library imports
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -74,6 +77,7 @@ from evaluations import (
     ndcg_at_k,
     planner_coverage_score,
     planner_hit_rate,
+    planner_specificity_score,
     precision_at_k,
     recall_at_k,
     compute_cave_score,
@@ -93,6 +97,7 @@ from verifier.verifier import build_cave_vlm_cot_graph
 df = pd.read_csv("scienceqa_augmented.csv")
 df = df.iloc[:5000]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
 # Shard the dataframe.
 # Each shard gets a contiguous, non-overlapping slice.
 # If the CSV is not pre-shuffled by subject, add:
@@ -151,12 +156,7 @@ experiment_df = pd.DataFrame(experiment_data)
 
 # Upload (or reuse) dataset in Phoenix
 # Initialize the experiments client
-experiments_client = Client(
-    # http_client=httpx.Client(
-    #     base_url="http://127.0.0.1:6006",
-    #     timeout=httpx.Timeout(120.0, connect=10.0),
-    # )
-)
+experiments_client = Client()
 
 # Upload dataset to Phoenix
 try:
@@ -235,8 +235,13 @@ def eval_coverage_pass(output: dict) -> bool:
         return False
     return output.get("planner_coverage", 0.0) > 0.5
 
-# Question Image Citation Evaluators (replacing legacy ROI evaluators)
+def eval_planner_specificity(output: dict) -> float:
+    """Extract pre-computed planner specificity score."""
+    if output is None:
+        return 0.0
+    return output.get("planner_specificity", 0.0)
 
+# Question Image Citation Evaluators (replacing legacy ROI evaluators)
 def eval_qi_citation_coverage(output: dict) -> float:
     """Coverage: Did samples with images cite those images?
     Returns 1.0 if:
@@ -355,6 +360,7 @@ ALL_EVALUATORS = [
     eval_ndcg,
     eval_recall_pass,
     eval_coverage_pass,
+    eval_planner_specificity,
     # Question Image citation evaluators (NEW - replacing ROI evaluators)
     eval_qi_citation_coverage,
     eval_qi_citation_count,
@@ -398,6 +404,7 @@ def _index_needs_rebuild(expected_rows: int) -> bool:
     except Exception:
         return True
     return False
+
 num_text_rows = len(df)  # rough lower bound; actual text rows = 1 per CSV row
 if _index_needs_rebuild(num_text_rows):
     from utils import build_text_index
@@ -509,6 +516,7 @@ _DEFAULT_OUTPUT = {
     "verified_answer": "",
     "planner_hit": False,
     "planner_coverage": 0.0,
+    "planner_specificity": 0.0,
     "recall_at_2": 0.0,
     "precision_at_2": 0.0,
     "mrr": 0.0,
@@ -541,9 +549,9 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
     """
     Run the CaVe-VLM-CoT pipeline with verification and retry loop.
 
-    The graph (app) handles: Planner → Retriever → Solver → Verifier
+    The graph (app) handles: Extractor → Retriever → Solver → Verifier
     - If VERIFIED: Done
-    - If REJECTED: Retry planner with feedback (up to 3 attempts)
+    - If REJECTED: Retry extractor with feedback (up to 3 attempts)
     """
 
     pid = input.get("pid", "unknown")
@@ -615,6 +623,7 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
             # Retrieval metrics
             "planner_hit": planner_hit_rate(result_state, k=2),
             "planner_coverage": planner_coverage_score(result_state),
+            "planner_specificity": planner_specificity_score(result_state),
             "recall_at_2": recall_result["recall"],
             "precision_at_2": precision_at_k(result_state, k=2),
             "mrr": mean_reciprocal_rank(result_state),
@@ -646,7 +655,6 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
 
     except Exception as e:
         print(f"Error processing example {input.get('pid', 'unknown')}: {e}")
-        import traceback
         tb_str = traceback.format_exc()
         traceback.print_exc()
 
@@ -670,7 +678,6 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
         # Attach the error to the active Phoenix span so it's visible in the
         # observability dashboard, not just the local log file.
         try:
-            from opentelemetry import trace as otel_trace
             span = otel_trace.get_current_span()
             if span and span.is_recording():
                 span.set_attribute("task.error_type", type(e).__name__)
@@ -717,4 +724,3 @@ print("  eval_qi_citation_coverage — % of image samples with Question Image ci
 print("  eval_qi_citation_count    — Average number of QI citations per sample")
 print("  eval_hallucination_rate   — % of hallucinated claims")
 print("  eval_decision_correct     — % of correct verifier decisions")
-
