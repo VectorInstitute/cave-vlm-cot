@@ -191,11 +191,10 @@ All pipeline stages emit OpenTelemetry spans to Arize Phoenix via `BatchSpanProc
 
 ## Useful resources
 
-1. https://medium.com/kx-systems/guide-to-multimodal-rag-for-images-and-text-10dab36e3117 (Method 2)
-2. https://blog.roboflow.com/image-search-engine-gaudi2/
-3. https://cookbook.openai.com/examples/custom_image_embedding_search
-4. https://medium.com/@rossashman/
-   the-art-of-rag-part-3-reranking-with-cross-encoders-688a16b64669
-6. https://medium.com/@aishikbhattacharjee98/6. reranking-using-cross-encoder-boost-your-rag-pipeline-accuracy-d2da22006dad
-7. https://medium.com/@abheshith7/9.mastering-reranking-in-rag-from-basic-retrieval-to-advanced-methods-db297530361a
-8. https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct 
+https://medium.com/kx-systems/guide-to-multimodal-rag-for-images-and-text-10dab36e3117 (Method 2)
+https://blog.roboflow.com/image-search-engine-gaudi2/
+https://cookbook.openai.com/examples/custom_image_embedding_search
+https://medium.com/@rossashman/the-art-of-rag-part-3-reranking-with-cross-encoders-688a16b64669
+https://medium.com/@aishikbhattacharjee98/reranking-using-cross-encoder-boost-your-rag-pipeline-accuracy-d2da22006dad
+https://medium.com/@abheshith7/mastering-reranking-in-rag-from-basic-retrieval-to-advanced-methods-db297530361a
+https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct 
