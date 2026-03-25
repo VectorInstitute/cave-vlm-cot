@@ -6,7 +6,7 @@ A five-stage agentic RAG pipeline for grounded multimodal reasoning on science Q
 
 ## Architecture
  
-![CaVe-VLM-CoT Architecture](figure.png)
+![CaVe-VLM-CoT Architecture](CAVE.png)
 
 Each stage is a node in a **LangGraph** state machine. The shared `State` Pydantic object carries inputs, intermediate outputs, citations, verdicts, and retry history through the entire graph.
 
