@@ -83,7 +83,6 @@ def generate_targeted_feedback(
         for h in fake_citations[:3]:  # Show top 3
             if 'Text Evidence' in h['claim']:
                 feedback_parts.append(f"  • Needed text about: {extract_topic_from_claim(h['claim'])}")
-            # elif 'Image ROI' in h['claim']:
             elif 'Question Image' in h['claim']:
                 feedback_parts.append(f"  • Needed image showing: {extract_topic_from_claim(h['claim'])}")
 
@@ -179,12 +178,10 @@ def prepare_images_for_verifier(state):
     Returns (image_sources, descriptions) where image_sources are strings:
     file:// paths so process_vision_info can load them.
     """
-    # images = []
     image_sources = []
     descriptions = []
 
     MAX_IMAGES = 4  # keep low for consistent processor token counts
-    # TARGET_SIZE = (448, 448)  # CRITICAL: Resize all images to same size for uniform grid
     # Question images: use file:// path (Qwen2.5-VL supports local files)
     
     # Question images (from paths)
@@ -201,10 +198,6 @@ def prepare_images_for_verifier(state):
 
         if img_path and os.path.exists(img_path):
             try:
-                # images.append(Image.open(img_path).convert('RGB'))
-                # img = Image.open(img_path).convert('RGB')
-                # img = img.resize(TARGET_SIZE, Image.Resampling.LANCZOS)  # Resize for uniform grid
-                # images.append(img)
                 image_sources.append("file://" + os.path.abspath(img_path))
                 descriptions.append(f"[Question Image {idx + 1}]")
             except Exception as e:
@@ -226,12 +219,12 @@ def verifier_step(state: State, model, processor) -> State:
         #   1. skips query keys starting with "_"
         #   2. filters chunks with len(stripped) <= 10
         #   3. caps each query at 5 chunks
-        #   4. caps total at 10 entries
+        #   4. caps total at 15 entries
         # Applying different rules here causes the verifier to see a different chunk
         # under the same label → it flags correct citations as fake/misrepresented.
-        # Build the evidence list via the canonical helper so [Text Evidence N]
-        # labels seen by the verifier are identical to what the solver was shown
-        # and what citation_injector used for injection.
+        # Build the evidence list via the canonical helper in citation injector so 
+        # [Text Evidence N] labels seen by the verifier are identical to what the solver 
+        # was shown and what citation_injector used for injection.
         all_text_chunks = _build_text_chunk_list(
             state.retrieved_chunks, total_cap=15, truncate=500
         )
@@ -285,7 +278,9 @@ def verifier_step(state: State, model, processor) -> State:
             vlm_span.set_attribute("vlm.model_name", "Qwen-2.5-VL-7B")
 
             # Official Qwen2.5-VL flow (https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct):
-            # 1) Messages with image sources in content; 2) apply_chat_template; 3) process_vision_info(messages); 4) processor(text=..., images=image_inputs, videos=video_inputs)
+            # 1) Messages with image sources in content; 2) apply_chat_template; 
+            # 3) process_vision_info(messages); 
+            # 4) processor(text=..., images=image_inputs, videos=video_inputs)
             if image_sources:
                 content = [
                     *[{"type": "image", "image": src} for src in image_sources],
@@ -417,7 +412,6 @@ def verifier_step(state: State, model, processor) -> State:
         # verdict=REJECTED but verifier couldn't name the correct answer
         # (Verified Answer=INCONCLUSIVE). The verifier prompt says to write INCONCLUSIVE
         # when it detects a hallucination but doesn't know what the right answer is.
-        # At n=1000, 76/82 of these are false rejections — the solver was right.
         # A rejection without an alternative answer is not strong enough evidence to
         # override the solver. Recover the solver's letter and downgrade to VERIFIED/LOW.
         if state.verdict == "REJECTED" and state.verifier_answer == "INCONCLUSIVE":
@@ -504,9 +498,7 @@ def should_retry_planning(state: State, max_retries: int = 3) -> bool:
         return True
 
     # Retry if minor hallucinations and medium-or-lower confidence.
-    # Previously only LOW confidence triggered a retry here, meaning a
-    # MINOR + MEDIUM verdict (like the PID 655 false rejection) always
-    # finalized without retrying.  MEDIUM confidence on a MINOR hallucination
+    # MEDIUM confidence on a MINOR hallucination
     # finding is uncertain enough to warrant one more attempt — the verifier
     # may have misread the image or been misled by injected text citations.
     if state.hallucination == "MINOR HALLUCINATIONS" and state.confidence in [
@@ -564,15 +556,18 @@ def _should_skip_verifier(state: State) -> bool:
     )
     if has_images:
         return False
+    
     # Require a successfully extracted answer letter
     fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
     if not fa_match:
         return False
+    
     # Require ≥2 text citations (the injector ran and found grounding evidence)
     reasoning = ' '.join(state.reasoning_steps or [])
     text_cites = len(re.findall(r'\[Text Evidence \d+\]', reasoning))
     if text_cites < 2:
         return False
+    
     return True
 
 def _auto_verify_step(state: State) -> State:
@@ -679,7 +674,6 @@ def build_cave_vlm_cot_graph(
 
     graph.add_edge("plan", "retrieve")
     graph.add_edge("retrieve", "solve")
-    # graph.add_edge("solve", "verify")
     graph.add_edge("solve", "inject_citations")
     graph.add_edge("inject_citations", "verify")
 
