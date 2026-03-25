@@ -538,11 +538,6 @@ def should_plan(state: State, max_retries: int = 3) -> str:
 
     return END
 
-# In build_cave_vlm_cot_graph, make verifier optional
-# def should_plan(state: State) -> str:
-#     # Skip retry logic entirely
-#     return END
-
 def _should_skip_verifier(state: State) -> bool:
     """
     Return True when the verifier can be safely skipped.

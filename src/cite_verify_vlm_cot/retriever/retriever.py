@@ -66,6 +66,7 @@ clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 columns = ["media_type", "text", "embeddings", "roi_id", "bbox", "source_image"]
 data = pd.DataFrame(columns=columns)
 
+# https://medium.com/kx-systems/guide-to-multimodal-rag-for-images-and-text-10dab36e3117 (Method 2)
 # Helper functions
 # @tracer.chain()
 def text_to_embedding(text):
@@ -81,6 +82,8 @@ def image_embedding(image_path):
     else:
         image = image_path
     
+    # Prepare the image for the model
+    # return_tensors="pt" specifies PyTorch tensors
     inputs = clip_processor(images=image, return_tensors="pt").to(clip_model.device)
     
     with torch.no_grad():
@@ -91,6 +94,8 @@ def image_embedding(image_path):
         if isinstance(output, torch.Tensor):
             image_features = output
         elif hasattr(output, 'pooler_output'):
+            # Extract the tensor from BaseModelOutputWithPooling
+            # get_image_features returns BaseModelOutputWithPooling with .pooler_output attribute
             image_features = output.pooler_output
         elif hasattr(output, 'last_hidden_state'):
             # Use CLS token if pooler_output not available
@@ -99,8 +104,9 @@ def image_embedding(image_path):
             # Try to convert directly
             image_features = torch.tensor(output)
     
-    # Normalize the embeddings
+    # Normalize the embeddings (important for accurate similarity comparisons later)
     image_embeddings = image_features / image_features.norm(dim=-1, keepdim=True)
+    # embeddings shape should be (1, 512) for the base model
     
     return image_embeddings.cpu().numpy()
 
@@ -150,6 +156,25 @@ def web_search(query: str, k: int = 2) -> List[str]:
     """
     return list(_web_search_cached(query, k))
 
+# https://blog.roboflow.com/image-search-engine-gaudi2/
+# https://cookbook.openai.com/examples/custom_image_embedding_search
+
+"""
+ROI index → built from image patch/object embeddings → use CLIP text encoder
+CLIP is explicitly trained for text–image alignment. SentenceTransformers are not.
+
+SentenceTransformer for ROIs is a semantic mismatch
+If your ROI index contains embeddings from:
+- CLIP vision encoder
+- ViT patches
+- region crops
+then querying it with SentenceTransformer text embeddings puts you in two different embedding spaces.
+That leads to:
+- weaker retrieval
+-brittle similarity scores
+- harder-to-debug failures
+"""
+
 def get_text_embedding(text: str) -> np.ndarray:
     """Generate CLIP text embedding in the shared image-text space."""
     inputs = clip_processor(text=[text], return_tensors="pt", padding=True).to(clip_model.device)
@@ -186,6 +211,7 @@ class BM25Retriever:
         top_k_indices = np.argsort(scores)[::-1][:k]
         return [(idx, scores[idx]) for idx in top_k_indices]
 
+
 def dense_retrieval(query: str, text_index, k: int = 5) -> list:
     # IMPORTANT: text_index must have been built from text-only rows so that
     # integer positions returned by FAISS map correctly to the reset-index
@@ -193,17 +219,22 @@ def dense_retrieval(query: str, text_index, k: int = 5) -> list:
     # The text_data parameter was removed — it was accepted but never used.
     q_embed = text_to_embedding(query).reshape(1, -1)
     D, I = text_index.search(q_embed.astype(np.float32), k)
+    # Note: FAISS returns distances, lower is better for L2, higher for IP
+    # Convert to (index, score) format
     return [(I[0][i], float(D[0][i])) for i in range(k) if I[0][i] >= 0]
 
 def rrf_fusion(dense_results: list, sparse_results: list, k: int = 60) -> list:
     scores = {}
 
+    # Add dense retrieval scores
     for rank, (idx, _) in enumerate(dense_results):
         scores[idx] = scores.get(idx, 0) + 1 / (k + rank + 1)
 
+    # Add sparse retrieval scores
     for rank, (idx, _) in enumerate(sparse_results):
         scores[idx] = scores.get(idx, 0) + 1 / (k + rank + 1)
 
+    # Sort by combined RRF score
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 def hybrid_retrieval(query: str, text_index, bm25_retriever: BM25Retriever,
@@ -212,16 +243,28 @@ def hybrid_retrieval(query: str, text_index, bm25_retriever: BM25Retriever,
     # BM25Retriever corpus positions both map into the same DataFrame slice.
     # Without this, a DataFrame that interleaves text and image rows would
     # cause FAISS index position i to refer to a different row than iloc[i].
+
+    # Filter to text-only data
     text_data = data[data['media_type'] == 'text'].reset_index(drop=True)
+
+    # Get more candidates than needed for fusion
     num_candidates = k * 3
 
+    # Dense retrieval (uses text_data indices)
     dense_results = dense_retrieval(query, text_index, k=num_candidates)
+
+    # Sparse retrieval (BM25 already built on text corpus)
     sparse_results = bm25_retriever.retrieve(query, k=num_candidates)
+
+    # Fuse results using RRF
     fused_results = rrf_fusion(dense_results, sparse_results)
 
+    # Return top-k document texts
     return [text_data.iloc[idx]["text"].strip() for idx, _ in fused_results[:k]]
 
 # RERANKER
+
+# Cosine similarity reranker (text-only)
 def rerank_by_similarity(subquery: str, evidences: List[str], model) -> List[str]:
     q_embed = model.encode(subquery, normalize_embeddings=True)
     e_embeds = model.encode(evidences, normalize_embeddings=True)
@@ -230,13 +273,22 @@ def rerank_by_similarity(subquery: str, evidences: List[str], model) -> List[str
     ranked = sorted(zip(evidences, scores), key=lambda x: x[1], reverse=True)
     return [e[0] for e in ranked]
 
+# https://medium.com/@rossashman/the-art-of-rag-part-3-reranking-with-cross-encoders-688a16b64669
+# https://medium.com/@aishikbhattacharjee98/reranking-using-cross-encoder-boost-your-rag-pipeline-accuracy-d2da22006dad
+# https://medium.com/@abheshith7/mastering-reranking-in-rag-from-basic-retrieval-to-advanced-methods-db297530361a
+
 def rerank_with_cross_encoder(query: str, documents: list, top_k: int = 2) -> list:
     """Rerank documents using cross-encoder."""
     if not documents:
         return []
 
+    # Create query-document pairs
     pairs = [[query, doc] for doc in documents]
+
+    # Get scores from cross-encoder
     scores = cross_encoder.predict(pairs)
+
+    # Sort by score (descending) and return top_k
     scored_docs = list(zip(documents, scores))
     scored_docs.sort(key=lambda x: x[1], reverse=True)
 
@@ -352,6 +404,16 @@ def _web_search_with_choices(query: str, choices: list, k: int = 2) -> list:
 
     return all_results
 
+# Perform Dual Retrieval at Inference
+
+# At query time:
+# 1. Embed your query in both formats:
+# Text embedding → use bge or other text model → 384-dim
+# Image embedding (if query includes image) → use CLIP → 512-dim
+# 2. Search both indexes independently:
+# 3. Normalize scores and merge (e.g., via weighted sum or ranking fusion):
+# 4. Return top-N unique results across modalities.
+
 def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_encoder=True):
     """
     Simplified retriever: Text + Web Search only.
@@ -365,12 +427,14 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
       4. Merge: top-2 local + reranked web
     """
     
+    # chain is just a logic step, it's almost the default in a way. There's no LLM or tool call or it's not an agent it's just a chain.
     with tracer.start_as_current_span("Retriever", openinference_span_kind="retriever") as retriever_span:
         
         # Initialise BM25 on the text-only slice (reset index so that
         # FAISS row numbers and BM25 corpus positions align).
         text_data = data[data["media_type"] == "text"].reset_index(drop=True)
 
+        # Initialize BM25 retriever once (outside the loop for efficiency)
         if use_hybrid:
             corpus_texts = text_data["text"].tolist()
             bm25_retriever = BM25Retriever(corpus_texts)
@@ -402,19 +466,22 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
             all_local_queries = [subquery] + paraphrases
             # Local corpus (hybrid or dense) — run on original + paraphrases
             for lq in all_local_queries:
+                # Text embedding search
                 try:
                     if use_hybrid:
+                        # Hybrid: BM25 + Dense with RRF fusion
                         for doc in hybrid_retrieval(
                             query=lq,
                             text_index=text_index,
                             bm25_retriever=bm25_retriever,
                             data=data,
-                            k=retrieval_k * 2,
+                            k=retrieval_k * 2, # Get more candidates for reranking
                         ):
                             if doc not in seen_local:
                                 seen_local.add(doc)
                                 local_docs.append(doc)
                     else:
+                        # Dense-only retrieval
                         q_embed = text_to_embedding(lq).reshape(1, -1)
                         D, I = text_index.search(q_embed.astype(np.float32), retrieval_k * 2)
                         for j in range(retrieval_k * 2):
@@ -499,10 +566,12 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
         print(f"  Question has {num_imgs} images (passed directly to solver)")
 
         retrieved_dict = {query: v.model_dump() for query, v in retrieved.items()}
+        # use OpenInference semantic conventions
         retriever_span.set_attribute("retriever.queries", json.dumps(retrieved_dict))
         
         # Metrics
         recall_result = recall_at_k(state, k=retrieval_k)
+        # Log to span
         retriever_span.set_attribute("retriever.recall", recall_result["recall"])
     
     return state

@@ -1,3 +1,5 @@
+# Phoenix is an application that can receive the traces that you're going to send from your agent here and then can visualize those in a UI
+
 from phoenix.otel import register
 from openinference.instrumentation.openai import OpenAIInstrumentor
 from openinference.semconv.trace import SpanAttributes

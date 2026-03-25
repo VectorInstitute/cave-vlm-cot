@@ -354,14 +354,24 @@ def solver_step(state: State, model, processor, kwargs) -> State:
         # {"type": "image"} dict in the content list. Manually embedding the tokens
         # or relying on processor(images=...) without the content dicts produces
         # mismatched cross-attention and garbled output.
+
+        # Llama-3.2-Vision (MLlama) requires image tokens embedded in the message
+        # content. Passing images=... to processor alone is not enough — the text
+        # must contain exactly one <|image|> placeholder per image. The correct way
+        # is to build a multimodal content list so apply_chat_template inserts them.
+
+        # For VLM, describe retrieved images as text captions in the prompt.
+        # Do NOT inject <|image|> tokens manually here — the processor inserts them
+        # when images are passed to processor(images=..., text=...).
         if images:
+            # Each image becomes a {"type": "image"} dict; text follows at the end.
             content_parts = [{"type": "image"} for _ in images]
             content_parts.append({"type": "text", "text": prompt})
             messages = [{"role": "user", "content": content_parts}]
         else:
             messages = [{"role": "user", "content": prompt}]
         
-        # Log
+        # Log input attributes
         solver_span.set_attribute("solver.question", state.question)
         solver_span.set_attribute("solver.num_images", len(images))
         
@@ -371,6 +381,8 @@ def solver_step(state: State, model, processor, kwargs) -> State:
             
             text = processor.apply_chat_template(messages, add_generation_prompt=True)
             
+            # Process inputs (note: first arg is images, None for text-only)
+            # Pass actual images to processor
             inputs = processor(
                 images=images if images else None,
                 text=text,
@@ -379,9 +391,16 @@ def solver_step(state: State, model, processor, kwargs) -> State:
             
             with torch.no_grad():
                 outputs = model.generate(**inputs, **kwargs)
+                # outputs.shape = [batch_size, sequence_length]
+                # e.g., tensor([[1, 2, 3, 4, 5, ...]])  # 2D tensor
+
+                # Add these lines to free memory
                 torch.cuda.empty_cache()
                 gc.collect()
             
+            # Decode the output properly
+            # outputs is a tensor of shape [batch_size, sequence_length]
+            # Use batch_decode for proper decoding
             decoded = processor.batch_decode(outputs, skip_special_tokens=True)[0]
             
             # Extract just the assistant's response. Split on the role
@@ -390,7 +409,10 @@ def solver_step(state: State, model, processor, kwargs) -> State:
             parts = re.split(r'\nassistant\n', decoded, flags=re.IGNORECASE)
             if len(parts) > 1:
                 full_output = parts[-1].strip()
+            # Extract just the assistant's response (after the prompt)
+            # The output includes the full prompt + response, so we need to extract just the new part
             elif "assistant" in decoded.lower():
+                # Split at the last occurrence of "assistant" to get the model's response
                 full_output = decoded.split("assistant")[-1].strip()
             else:
                 full_output = decoded

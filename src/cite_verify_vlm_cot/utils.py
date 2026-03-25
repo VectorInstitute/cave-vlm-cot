@@ -216,6 +216,8 @@ def build_full_image_indexes(csv_path: str = "scienceqa_augmented.csv"):
     # correspond directly to text_data.iloc[i], matching hybrid_retrieval's
     # expectation.  Building from the full interleaved `data` would misalign
     # FAISS positions with DataFrame rows the moment image rows are present.
+
+    # Maintain separate FAISS indexes for text and image
     text_data = data[data["media_type"] == "text"].reset_index(drop=True)
     if len(text_data):
         text_vectors = np.vstack(text_data["embeddings"].values).astype(np.float32)
