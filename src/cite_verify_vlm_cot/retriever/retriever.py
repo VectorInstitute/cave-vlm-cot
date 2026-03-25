@@ -2,9 +2,7 @@ import math
 import pandas as pd
 import numpy as np
 import faiss
-from tqdm import tqdm
 import gc
-from PIL import Image
 import os
 import json
 import ast
@@ -12,13 +10,9 @@ from typing import List, Tuple
 import re
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
-from transformers import CLIPProcessor, CLIPModel
-import hashlib
-import base64
-from io import BytesIO
+import time as _time
 
 import phoenix as px
-import os
 
 from dotenv import load_dotenv
 load_dotenv()  # loads .env into os.environ before any key checks
@@ -39,13 +33,13 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
 from tracer import tracer
-from utils import State, RoiInfo, ChunkInfo, safe_parse_json, safe_str, build_full_image_indexes
+from utils import State, ChunkInfo, safe_parse_json, safe_str, build_text_index
 
-# Load cross-encoder — force onto GPU if available so batch scoring runs
-# ~10× faster than CPU (A100 latency: ~50ms vs ~500ms for 15-pair batches).
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import functools
 
+# Load cross-encoder — force onto GPU if available so batch scoring runs
+# ~10× faster than CPU (A100 latency: ~50ms vs ~500ms for 15-pair batches).
 # Pin cross-encoder to cuda:0 explicitly.
 # cuda:0 hosts the small Qwen2.5-7B-4bit planner (~4GB) and leaves >70GB free,
 # so co-locating the <0.5GB cross-encoder there wastes nothing while giving
@@ -59,56 +53,14 @@ cross_encoder = CrossEncoder(
 )
 
 text_model = SentenceTransformer("all-MiniLM-L6-v2")
-clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-# Prepare a dataframe to store file path, media_type, text, and embeddings in
-columns = ["media_type", "text", "embeddings", "roi_id", "bbox", "source_image"]
-data = pd.DataFrame(columns=columns)
-
-# https://medium.com/kx-systems/guide-to-multimodal-rag-for-images-and-text-10dab36e3117 (Method 2)
 # Helper functions
+
 # @tracer.chain()
 def text_to_embedding(text):
     text = text.replace("\n", " ")
     embedding = text_model.encode(text, batch_size=1, normalize_embeddings=True)
     return embedding
-
-# @tracer.chain()
-def image_embedding(image_path):
-    """Generate CLIP embedding for an image in the shared image-text space."""
-    if isinstance(image_path, str):
-        image = Image.open(image_path).convert("RGB")
-    else:
-        image = image_path
-    
-    # Prepare the image for the model
-    # return_tensors="pt" specifies PyTorch tensors
-    inputs = clip_processor(images=image, return_tensors="pt").to(clip_model.device)
-    
-    with torch.no_grad():
-        # Get image features - handle different return types
-        output = clip_model.get_image_features(**inputs)
-        
-        # Handle case where output is a ModelOutput object vs raw tensor
-        if isinstance(output, torch.Tensor):
-            image_features = output
-        elif hasattr(output, 'pooler_output'):
-            # Extract the tensor from BaseModelOutputWithPooling
-            # get_image_features returns BaseModelOutputWithPooling with .pooler_output attribute
-            image_features = output.pooler_output
-        elif hasattr(output, 'last_hidden_state'):
-            # Use CLS token if pooler_output not available
-            image_features = output.last_hidden_state[:, 0, :]
-        else:
-            # Try to convert directly
-            image_features = torch.tensor(output)
-    
-    # Normalize the embeddings (important for accurate similarity comparisons later)
-    image_embeddings = image_features / image_features.norm(dim=-1, keepdim=True)
-    # embeddings shape should be (1, 512) for the base model
-    
-    return image_embeddings.cpu().numpy()
 
 @functools.lru_cache(maxsize=4096)
 def _web_search_cached(query: str, k: int) -> tuple:
@@ -121,7 +73,7 @@ def _web_search_cached(query: str, k: int) -> tuple:
     maxsize=4096 covers ~1 query per row of a 5,000-row dataset with headroom.
     Returns a tuple (hashable) so lru_cache can store it.
     """
-    import time as _time
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -144,9 +96,9 @@ def web_search(query: str, k: int = 2) -> List[str]:
     """
     Search using DuckDuckGo (free, no API key needed).
     Results are LRU-cached by (query, k): identical queries within a run
-    return instantly without a network call.  Includes exponential backoff
-    on rate-limit errors so that parallel bursts from _web_search_with_choices
-    don't permanently exhaust the DDG rate-limit window.
+    return instantly without a network call.  
+    Includes exponential backoff on rate-limit errors so that parallel bursts 
+    from _web_search_with_choices don't permanently exhaust the DDG rate-limit window.
 
     Args:
         query: Search query string
@@ -156,50 +108,9 @@ def web_search(query: str, k: int = 2) -> List[str]:
     """
     return list(_web_search_cached(query, k))
 
-# https://blog.roboflow.com/image-search-engine-gaudi2/
-# https://cookbook.openai.com/examples/custom_image_embedding_search
-
-"""
-ROI index → built from image patch/object embeddings → use CLIP text encoder
-CLIP is explicitly trained for text–image alignment. SentenceTransformers are not.
-
-SentenceTransformer for ROIs is a semantic mismatch
-If your ROI index contains embeddings from:
-- CLIP vision encoder
-- ViT patches
-- region crops
-then querying it with SentenceTransformer text embeddings puts you in two different embedding spaces.
-That leads to:
-- weaker retrieval
--brittle similarity scores
-- harder-to-debug failures
-"""
-
-def get_text_embedding(text: str) -> np.ndarray:
-    """Generate CLIP text embedding in the shared image-text space."""
-    inputs = clip_processor(text=[text], return_tensors="pt", padding=True).to(clip_model.device)
-    with torch.no_grad():
-        # Get text features - handle different return types
-        output = clip_model.get_text_features(**inputs)
-        
-        # Handle case where output is a ModelOutput object vs raw tensor
-        if isinstance(output, torch.Tensor):
-            text_features = output
-        elif hasattr(output, 'pooler_output'):
-            text_features = output.pooler_output
-        elif hasattr(output, 'last_hidden_state'):
-            text_features = output.last_hidden_state[:, 0, :]
-        else:
-            text_features = torch.tensor(output)
-    
-    # Normalize
-    feats = text_features / text_features.norm(dim=-1, keepdim=True)
-    return feats.cpu().numpy().astype(np.float32) 
-
 # HYBRID RETRIEVER
 class BM25Retriever:
     """BM25 sparse retriever for keyword-based search."""
-
     def __init__(self, corpus_texts: list):
         self.corpus = corpus_texts
         tokenized = [doc.lower().split() for doc in corpus_texts]
@@ -211,12 +122,10 @@ class BM25Retriever:
         top_k_indices = np.argsort(scores)[::-1][:k]
         return [(idx, scores[idx]) for idx in top_k_indices]
 
-
 def dense_retrieval(query: str, text_index, k: int = 5) -> list:
     # IMPORTANT: text_index must have been built from text-only rows so that
     # integer positions returned by FAISS map correctly to the reset-index
     # text_data slice used in hybrid_retrieval.
-    # The text_data parameter was removed — it was accepted but never used.
     q_embed = text_to_embedding(query).reshape(1, -1)
     D, I = text_index.search(q_embed.astype(np.float32), k)
     # Note: FAISS returns distances, lower is better for L2, higher for IP
@@ -264,15 +173,6 @@ def hybrid_retrieval(query: str, text_index, bm25_retriever: BM25Retriever,
 
 # RERANKER
 
-# Cosine similarity reranker (text-only)
-def rerank_by_similarity(subquery: str, evidences: List[str], model) -> List[str]:
-    q_embed = model.encode(subquery, normalize_embeddings=True)
-    e_embeds = model.encode(evidences, normalize_embeddings=True)
-
-    scores = [cos_sim(q_embed, e)[0][0].item() for e in e_embeds]
-    ranked = sorted(zip(evidences, scores), key=lambda x: x[1], reverse=True)
-    return [e[0] for e in ranked]
-
 # https://medium.com/@rossashman/the-art-of-rag-part-3-reranking-with-cross-encoders-688a16b64669
 # https://medium.com/@aishikbhattacharjee98/reranking-using-cross-encoder-boost-your-rag-pipeline-accuracy-d2da22006dad
 # https://medium.com/@abheshith7/mastering-reranking-in-rag-from-basic-retrieval-to-advanced-methods-db297530361a
@@ -298,11 +198,13 @@ def rerank_with_cross_encoder(query: str, documents: list, top_k: int = 2) -> li
 def _expand_subquery(query: str) -> List[str]:
     """
     Generate lightweight paraphrases of a planner subquery for query expansion.
-    Motivation (v44): planner_hit has been flat at 28% across all versions.
+    
+    Motivation: planner_hit has been flat at 28% across all versions.
     The primary cause is vocabulary mismatch between planner-generated queries
     and KB / web content. The same fact can be expressed in many ways, and a
     single query formulation reliably misses documents that use different
     terminology (e.g. "photosynthesis light reaction" vs "Calvin cycle input").
+    
     Strategy: rule-based paraphrase generation, zero extra LLM calls, ~0ms overhead.
     Three expansion types, each targeting a different vocabulary gap:
       1. Keyword extraction — strip stop words and emit the core content words
@@ -314,6 +216,7 @@ def _expand_subquery(query: str) -> List[str]:
       3. "What is X" → "X definition explanation" — rephrase definition-seeking
          queries into noun-phrase form, which BM25 handles better than
          question-form queries.
+    
     Returns: list of unique paraphrases (not including the original query).
     Capped at 2 paraphrases to avoid flooding the evidence pool.
     """
@@ -325,6 +228,7 @@ def _expand_subquery(query: str) -> List[str]:
         'what', 'which', 'who', 'how', 'why', 'when', 'where', 'that',
         'this', 'these', 'those', 'and', 'or', 'but', 'if', 'as', 'it',
     }
+
     words = query.strip().split()
     content_words = [w for w in words if w.lower() not in stop_words and len(w) >= 3]
     paraphrases = []
@@ -353,6 +257,7 @@ def _web_search_with_choices(query: str, choices: list, k: int = 2) -> list:
     """
     Run web search with the base subquery PLUS choice-augmented variants,
     all in parallel via ThreadPoolExecutor.
+
     Sequential DDG calls at ~3-5s each were the single biggest latency
     bottleneck (~35s/question at 8 subqueries × 3 calls each). Parallel
     execution collapses N calls to the time of the slowest single call (~5s).
@@ -362,8 +267,8 @@ def _web_search_with_choices(query: str, choices: list, k: int = 2) -> list:
     Results are deduplicated before returning.
 
     This function uses ONLY query text and choices — no question metadata.
-    
     """
+
     # Build list of (query_string, k) jobs — base query first
     jobs: List[Tuple[str, int]] = [(query, k)]
 
@@ -372,11 +277,11 @@ def _web_search_with_choices(query: str, choices: list, k: int = 2) -> list:
         if 2 <= len(choice_str.split()) <= 5:
             augmented = f"{query} {choice_str}"[:200]
             jobs.append((augmented, 1))
+
     # Fire all jobs in parallel with a small stagger (0.3s between submissions).
     # Without staggering, all 5 DDG calls land simultaneously, which triggers
     # DDG's burst rate-limit after ~20-25 questions. A 0.3s stagger spreads
     # the burst over ~1.5s while keeping total wall-time far below sequential.
-    import time as _time
     results_by_job: dict = {}
     futures = {}
 
@@ -404,30 +309,22 @@ def _web_search_with_choices(query: str, choices: list, k: int = 2) -> list:
 
     return all_results
 
-# Perform Dual Retrieval at Inference
-
-# At query time:
-# 1. Embed your query in both formats:
-# Text embedding → use bge or other text model → 384-dim
-# Image embedding (if query includes image) → use CLIP → 512-dim
-# 2. Search both indexes independently:
-# 3. Normalize scores and merge (e.g., via weighted sum or ranking fusion):
-# 4. Return top-N unique results across modalities.
-
 def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_encoder=True):
     """
     Simplified retriever: Text + Web Search only.
     Question images are NOT processed here - they are passed directly 
     to the solver via state.image_paths.
+    
     Uses DuckDuckGo for web search (free, no API key needed).
+    
     Retrieval pipeline per subquery:
-      1. Hybrid local retrieval (dense FAISS + BM25 + RRF fusion)
+      1. Hybrid local retrieval (dense FAISS + BM25 + RRF fusion) with query expansion
       2. Choice-augmented web search
-      3. Cross-encoder reranking (web results)
-      4. Merge: top-2 local + reranked web
+      3. Cross-encoder reranking and web-first merge
     """
     
-    # chain is just a logic step, it's almost the default in a way. There's no LLM or tool call or it's not an agent it's just a chain.
+    # chain is just a logic step, it's almost the default in a way. 
+    # There's no LLM or tool call or it's not an agent it's just a chain.
     with tracer.start_as_current_span("Retriever", openinference_span_kind="retriever") as retriever_span:
         
         # Initialise BM25 on the text-only slice (reset index so that
@@ -451,10 +348,10 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
         if is_natural_science:
             print(f"  [Retriever] Natural science question — web_k={web_k} (doubled)")
 
-        # Per-subquery retrieval with query expansion (v44)
+        # Per-subquery retrieval with query expansion
         # For each planner subquery, generate up to 2 rule-based paraphrases
-        # and retrieve from the local KB using all variants. Web search uses
-        # only the original query (choice-augmented) to avoid latency blowup.
+        # and retrieve from the local KB using all variants. 
+        # Web search uses only the original query (choice-augmented) to avoid latency blowup.
         # Deduplication ensures the same chunk is never added twice.
         for subquery in state.subqueries:
             evidence = []
@@ -508,12 +405,14 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
                 print(f"Web search failed for [{subquery}]: {e}")
 
             # Cross-encoder reranking — generalised web-first merge.
-            # Design rationale (v43):
+            
+            # Design rationale:
             #   The system is designed as a general-purpose VQA reasoner, not a
             #   ScienceQA-specific one. The local KB may or may not contain
             #   content relevant to any given question. Blindly keeping top-N
             #   local docs regardless of relevance fills the evidence cap with
             #   noise and hurts citation precision.
+            
             #   Strategy: web-first, then admit local docs only when the
             #   cross-encoder confirms they are relevant to this specific subquery
             #   (score > 0). This approach is domain-agnostic:
@@ -523,17 +422,17 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
             #     - For questions not covered by the KB (e.g. generic VQA), local
             #       docs will score <= 0 and be excluded, leaving web results to
             #       fill all evidence slots.
-            #   top_k raised from (retrieval_k-1) to retrieval_k for web results:
-            #   with 3 subqueries × retrieval_k=3 web results each = 9 web chunks,
-            #   fitting comfortably under the 10-slot evidence cap in
-            #   build_evidence_index, with one slot remaining for relevant local docs.
+            
+            #   top_k raised from (retrieval_k-1) to retrieval_k for web results
             if use_cross_encoder and evidence:
                 local_set = set(local_docs)
                 web_evidence = [e for e in evidence if e not in local_set]
+                
                 # Rerank web results — always the primary evidence signal
                 reranked_web = rerank_with_cross_encoder(
                     subquery, web_evidence, top_k=max(1, retrieval_k)
                 )
+                
                 # Start with web results; admit local docs that pass relevance filter
                 merged = list(reranked_web)
                 seen_set = set(merged)
@@ -553,6 +452,7 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
                                 local_admitted += 1
                     except Exception as e:
                         print(f"  [Retriever] Local doc scoring failed: {e}")
+                
                 print(f"  [Retriever] Merge: {len(reranked_web)} web + "
                       f"{local_admitted} local (cross-encoder filtered)")
                 evidence = merged
@@ -566,11 +466,13 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
         print(f"  Question has {num_imgs} images (passed directly to solver)")
 
         retrieved_dict = {query: v.model_dump() for query, v in retrieved.items()}
+        
         # use OpenInference semantic conventions
         retriever_span.set_attribute("retriever.queries", json.dumps(retrieved_dict))
         
         # Metrics
         recall_result = recall_at_k(state, k=retrieval_k)
+        
         # Log to span
         retriever_span.set_attribute("retriever.recall", recall_result["recall"])
     
