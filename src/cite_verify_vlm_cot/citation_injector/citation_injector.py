@@ -25,13 +25,12 @@ from retriever.retriever import cross_encoder, web_search
 from utils import ChunkInfo
 
 # ms-marco cross-encoder scores range roughly -10 to +10
-# 0.5 balances precision and recall for the larger evidence pool introduced
-# in v43 (web-first merge, cross-encoder filtered local docs).
+# 0.5 balances precision and recall for the larger evidence pool 
+# (web-first merge, cross-encoder filtered local docs).
 # History:
 #   0.8 → too conservative, many valid pairs in 0.4–0.8 range went uncited
-#   0.4 → good for 10-chunk pool (v40 best precision), too many false positives
-#         when evidence pool grows (v42 analysis: cite_prec −7.6pp)
-#   0.5 → recalibrated for v43: filters the extra false positives from the
+#   0.4 → good for 10-chunk pool, too many false positives when evidence pool grows
+#   0.5 → filters the extra false positives from the
 #         wider retrieval while preserving the recall gains
 # already tried - 1.5, 0.3, 0.8, 0.4
 CITATION_THRESHOLD = 0.5
@@ -122,6 +121,7 @@ def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
     return claims
 
 # CANONICAL EVIDENCE LIST BUILDER
+
 # Single source of truth for chunk ordering, filtering, and capping.
 # Every place that needs to map [Text Evidence N] → chunk must call this so
 # the numbering is identical across solver, citation_injector, verifier, and
@@ -138,6 +138,7 @@ def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
 #      prompt limit — but prefer raising the solver cap to 15 so they match.
 #   6. Truncate each chunk to `truncate` chars (default 500).  Pass
 #      truncate=400 when building the solver prompt to preserve old behaviour.
+
 def _is_yesno_dk_key(query: str, retrieved_chunks: dict) -> bool:
     """Return True for dk_web_ keys that were generated from yes/no answer choices.
     For yes/no MCQ questions the planner creates dk_web_<answer_choice> queries
@@ -234,7 +235,6 @@ def build_evidence_index(state: State) -> Tuple[List[str], List[str], List[bool]
     is_generic      = [_is_generic_lecture(c) for c in text_chunks]
     
     # Add Question Image captions for matching
-
     qi_idx = 1
     for img_path in (state.image_paths or []):
         if img_path and os.path.exists(img_path):
@@ -282,7 +282,6 @@ def match_claims_to_evidence(
         if claim.get('in_observations'):
             continue
 
-        # pairs = [[claim['text'], ev] for ev in evidence_texts]
         # Build pairs, filtering out generic lectures while keeping
         # labels/texts in sync so the zip after scoring is correct.
         pairs = []
@@ -400,6 +399,7 @@ def inject_qi_into_observations(reasoning: str, num_images: int) -> str:
 
     for line in lines:
         stripped = line.strip()
+
         # Skip blank lines and lines that are just dashes/bullets with no content
         if not stripped or stripped in ('-', '*', '•'):
             new_lines.append(line)
@@ -445,18 +445,6 @@ def inject_qi_into_observations(reasoning: str, num_images: int) -> str:
     new_obs = '\n'.join(new_lines)
     return reasoning[:obs_match.start(2)] + new_obs + reasoning[obs_match.end(2):]
 
-
-# Lazy-loaded cross-encoder
-
-# _cross_encoder = None
-
-# def _get_cross_encoder():
-#     global _cross_encoder
-#     if _cross_encoder is None:
-#         from sentence_transformers import CrossEncoder
-#         _cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-#     return _cross_encoder
-
 def _has_sufficient_kb_evidence(state: State, min_chunks: int = 2, min_length: int = 80) -> bool:
     """
     Return True if the KB retrieval already produced enough substantive evidence
@@ -469,12 +457,12 @@ def _has_sufficient_kb_evidence(state: State, min_chunks: int = 2, min_length: i
     avoid polluting the evidence index with loosely-matched web snippets, which
     degrades citation precision on well-retrieved questions.
 
-    v37 post-mortem: DK enrichment helped image questions (weak KB retrieval,
-    Δcite_prec=+1.7pp) but hurt text-only questions (good KB retrieval,
-    Δcite_prec=−9.1pp) because topical-but-imprecise web snippets matched at
+    DK enrichment helped image questions (weak KB retrieval, Δcite_prec=+1.7pp) 
+    but hurt text-only questions (good KB retrieval, Δcite_prec=−9.1pp) 
+    because topical-but-imprecise web snippets matched at
     the 0.4 cross-encoder threshold and displaced higher-quality KB citations.
 
-    v38 post-mortem: min_length=150 was too strict for language science — grammar
+    min_length=150 was too strict for language science — grammar
     and vocabulary KB chunks are typically 80–120 chars. Those questions slipped
     through the gate, received DK web snippets, and lost citation precision.
     Lowered to 80 chars so short-but-precise language science chunks are correctly
@@ -552,7 +540,6 @@ def _enrich_domain_knowledge_evidence(state: State) -> State:
 def inject_citations(state: State, encoder=None) -> State:
     """
     Post-hoc citation injection into solver reasoning.
-    Simplified approach matching V17's good results.
     - Skip injection for image-primary questions with non-substantive text
     - Use single threshold (0.8) for all evidence
     - Simple pattern-based QI injection in OBSERVATIONS only
@@ -566,6 +553,7 @@ def inject_citations(state: State, encoder=None) -> State:
     # evidence before building the evidence index. This runs web_search only
     # for claims that have no KB match, and stores the results in
     # state.retrieved_chunks so both AIS and citation injection benefit.
+
     # GATED: skip when KB retrieval already produced ≥2 substantive chunks —
     # adding web snippets in that case reduces citation precision.
     if not _has_sufficient_kb_evidence(state):
@@ -587,12 +575,9 @@ def inject_citations(state: State, encoder=None) -> State:
     # Step 1: Simple QI injection into OBSERVATIONS (pattern-based only)
     if num_images > 0:
         reasoning = inject_qi_into_observations(reasoning, num_images)
+        
     # Step 2: Determine whether cross-encoder matching should run.
-    # Previously we bailed out entirely when has_observations=True and text
-    # isn't substantive. That blocked citation injection for "From domain
-    # knowledge" steps in the REASONING block, causing the citation_recall
-    # drop seen in v32 (68% of low-recall cases were image questions).
-    # Now we always proceed to cross-encoder matching, but skip claims that
+    # We always proceed to cross-encoder matching, but skip claims that
     # fall inside the <OBSERVATIONS> block (handled above in match_claims_to_evidence).
     # Only skip if there is genuinely no text evidence at all.
     has_observations = bool(re.search(
@@ -600,8 +585,6 @@ def inject_citations(state: State, encoder=None) -> State:
     ))
     text_is_substantive = any(
         len(chunk.strip()) > 150
-        # for ci in (state.retrieved_chunks or {}).values()
-        # for chunk in ci.text_chunks[:3]
         for ci in (state.retrieved_chunks or {}).values()
         for chunk in (ci.text_chunks if hasattr(ci, 'text_chunks') else ci.get('text_chunks', []))[:3]
         if not chunk.strip().lower().startswith(
@@ -625,6 +608,7 @@ def inject_citations(state: State, encoder=None) -> State:
 
     # Targeted CONCLUSION injection — always attempt to cite the final answer
     # sentence regardless of how many other claims are already cited.
+
     # grounding_score checks NLI(answer_claim, cited_evidence): if the conclusion
     # is uncited the grounding check has no evidence to work with and fails.
     # We extract the conclusion span and mark uncited conclusion claims so the
@@ -646,17 +630,16 @@ def inject_citations(state: State, encoder=None) -> State:
 
     # If >50% already cited, skip — UNLESS there are uncited conclusion or
     # reasoning claims that need targeted injection 
-    # Threshold kept at >50% (reverted from >80% in v39) to avoid injecting
+    # Threshold kept at >50% (reverted from >80%) to avoid injecting
     # weak citations onto transitional/meta sentences.
-    # v39 post-mortem: >80% caused 10 new wrong answers by running cross-encoder
-    # on sentences that previously exited cleanly, injecting at threshold 0.4.
     cited_count = len(claims) - len(uncited)
     if len(claims) > 0 and cited_count / len(claims) > 0.5:
         # Build evidence index once — shared by both targeted passes below.
         evidence_texts, evidence_labels, is_generic = build_evidence_index(state)
+        
         # Conclusion-targeted injection (all question types).
         # grounding_score checks NLI(answer_claim, cited_evidence) — if the
-        # conclusion is uncited the grounding check fails. Introduced in v40.
+        # conclusion is uncited the grounding check fails.
         if uncited_conclusion and evidence_texts:
             uncited_conclusion = match_claims_to_evidence(
                 uncited_conclusion, evidence_texts, evidence_labels, _encoder,
@@ -683,7 +666,6 @@ def inject_citations(state: State, encoder=None) -> State:
         return state
 
     # Step 5: Get cross-encoder and match
-    # encoder = cross_encoder or _get_cross_encoder()
     claims = match_claims_to_evidence(
         claims, evidence_texts, evidence_labels, _encoder,
         is_generic=is_generic,
