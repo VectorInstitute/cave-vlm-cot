@@ -122,7 +122,7 @@ def build_text_index(csv_path: str = "scienceqa_augmented.csv"):
     from retriever.retriever import text_to_embedding
 
     df = pd.read_csv(csv_path)
-    df = df.iloc[:5000]
+    # df = df.iloc[:5000]
     
     data = pd.DataFrame()
 

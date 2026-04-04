@@ -5,6 +5,7 @@ Experiments.py
 3. Evaluates the results using multiple metrics
 4. Logs everything to Phoenix (an ML observability platform)
 """
+from unsloth import FastLanguageModel
 import argparse
 
 import ast
@@ -62,7 +63,7 @@ if not (0 <= SHARD_INDEX < NUM_SHARDS):
     raise ValueError(f"--shard {SHARD_INDEX} out of range for --num-shards {NUM_SHARDS}")
 print(f"[Shard] Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
 
-CACHE_DIR = "/fs01/home/sneharao/hf_cache"
+CACHE_DIR = os.path.join(os.path.expanduser("~"), "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
@@ -90,12 +91,11 @@ from phoenix.client import Client
 # Your local modules
 from utils import State, safe_str, safe_parse_json
 from transformers import AutoProcessor, MllamaForConditionalGeneration
-from unsloth import FastLanguageModel
 from verifier.verifier import build_cave_vlm_cot_graph
 
 # Load your data
 df = pd.read_csv("scienceqa_augmented.csv")
-df = df.iloc[:5000]
+# df = df.iloc[:5000]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 # Shard the dataframe.
@@ -419,12 +419,6 @@ data = pd.read_csv(os.path.expanduser("~/outputs/multimodal_embeddings.csv"))
 
 # Now load all the models needed for the pipeline
 print("\nLoading models for the pipeline...")
-
-# Set cache directory
-cache_dir = "/fs01/home/sneharao/hf_cache"
-os.makedirs(cache_dir, exist_ok=True)
-os.environ["HF_HOME"] = cache_dir
-os.environ["TRANSFORMERS_CACHE"] = cache_dir
 
 # 1. Planner — Qwen2.5-7B (4-bit) — pinned to GPU0
 # GPU0 also hosts CrossEncoder and SentenceTransformer (< 2GB combined)
