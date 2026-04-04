@@ -18,8 +18,8 @@ import nest_asyncio # for running multiple calls asynchronously and simultaneous
 nest_asyncio.apply()
 
 # Phoenix is an application that can receive the traces that you're going to send from your agent here and then can visualize those in a UI
-# import phoenix as px
-# px_client = px.Client()
+import phoenix as px
+px_client = px.Client()
 
 # Add Phoenix API Key for tracing — load from environment, never hardcode secrets
 os.environ.setdefault("PHOENIX_API_KEY", os.getenv("PHOENIX_API_KEY", ""))
@@ -35,7 +35,7 @@ if not _api_key:
 # os.environ["PHOENIX_CLIENT_HEADERS"] = f"api_key={os.getenv('PHOENIX_API_KEY')}"
 
 # Start Phoenix server
-# session = px.launch_app()
+session = px.launch_app()
 
 PROJECT_NAME = "cite-and-verify-vlm-cot-agent"
 # Register base provider (phoenix sets a SimpleSpanProcessor by default;

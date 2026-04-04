@@ -25,10 +25,6 @@ du -sh ~/.cache
 
 du -sh ~/.cache/huggingface
 
-# To check available GPUs
-sinfo -o "%N %G" | grep gpu
-sinfo --Format=partition,gres,features,nodelist
-
 # Check available partitions
 sinfo -s
 PARTITION AVAIL  TIMELIMIT   NODES(A/I/O/T) NODELIST
@@ -52,33 +48,3 @@ sinfo -N -l
 
 # See why nodes are down
 sinfo -R
-
-pyarrow>=15.0.2
-pyarrow-hotfix>=0.7
-
-# 1. Core ML packages first
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# 2. Transformers ecosystem
-pip install transformers accelerate datasets tokenizers huggingface-hub
-
-# 3. Unsloth
-pip install unsloth
-
-# 4. Sentence transformers and retrieval
-pip install sentence-transformers rank-bm25
-
-# 5. LangGraph and agents
-pip install langgraph langchain
-
-# 6. Phoenix observability
-pip install arize-phoenix --no-deps
-pip install arize-phoenix-client arize-phoenix-evals arize-phoenix-otel \
-    openinference-instrumentation openinference-instrumentation-openai \
-    openinference-semantic-conventions
-
-# 7. Web and API
-pip install httpx ddgs python-dotenv nest-asyncio
-
-# 8. Everything else from requirements.txt
-pip install -r requirements.txt --no-deps
