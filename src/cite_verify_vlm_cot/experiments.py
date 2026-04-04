@@ -62,7 +62,7 @@ if not (0 <= SHARD_INDEX < NUM_SHARDS):
     raise ValueError(f"--shard {SHARD_INDEX} out of range for --num-shards {NUM_SHARDS}")
 print(f"[Shard] Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
 
-CACHE_DIR = "/fs01/home/sneharao/hf_cache"
+CACHE_DIR = "/fs02/home/sneharao/hf_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
@@ -94,8 +94,8 @@ from unsloth import FastLanguageModel
 from verifier.verifier import build_cave_vlm_cot_graph
 
 # Load your data
-df = pd.read_csv("scienceqa_augmented.csv")
-df = df.iloc[:5000]
+df = pd.read_csv("/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv")
+# df = df.iloc[:5000]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 # Shard the dataframe.
@@ -409,7 +409,7 @@ num_text_rows = len(df)  # rough lower bound; actual text rows = 1 per CSV row
 if _index_needs_rebuild(num_text_rows):
     from utils import build_text_index
     print("Building indexes (first run or stale index)...")
-    build_text_index("scienceqa_augmented.csv")
+    build_text_index("/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv")
     print("Indexes built!")
 
 # Load pre-built search indexes for fast retrieval

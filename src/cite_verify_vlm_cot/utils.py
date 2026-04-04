@@ -113,7 +113,7 @@ def safe_parse_json(x, default=None):
         except (ValueError, SyntaxError):
             return default if default is not None else {}
 
-def build_text_index(csv_path: str = "scienceqa_augmented.csv"):
+def build_text_index(csv_path: str = "/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"):
     """
     Build the text FAISS index from the ScienceQA KB.
     Question images are passed directly to the solver at inference time
@@ -122,7 +122,7 @@ def build_text_index(csv_path: str = "scienceqa_augmented.csv"):
     from retriever.retriever import text_to_embedding
 
     df = pd.read_csv(csv_path)
-    df = df.iloc[:5000]
+    # df = df.iloc[:5000]
     
     data = pd.DataFrame()
 

@@ -12,13 +12,14 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
 import time as _time
 
-import phoenix as px
+# import phoenix as px
 
 from dotenv import load_dotenv
 load_dotenv()  # loads .env into os.environ before any key checks
 
 # DuckDuckGo search - FREE, no API key needed!
-from ddgs import DDGS
+# from ddgs import DDGS
+from duckduckgo_search import DDGS
 
 import torch
 torch.backends.cuda.enable_flash_sdp(False)
