@@ -253,3 +253,6 @@ src/cite_verify_vlm_cot/logs/cave_shard_19499491_0.out
 src/cite_verify_vlm_cot/logs/cave_shard_19500214_1.err
 src/cite_verify_vlm_cot/logs/cave_shard_19500214_1.out
 src/cite_verify_vlm_cot/outputs/scienceqa_augmented.json
+
+src/cite_verify_vlm_cot/logs
+src/cite_verify_vlm_cot/unsloth_compiled_cache
