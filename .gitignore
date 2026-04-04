@@ -256,3 +256,4 @@ src/cite_verify_vlm_cot/outputs/scienceqa_augmented.json
 
 src/cite_verify_vlm_cot/logs
 src/cite_verify_vlm_cot/unsloth_compiled_cache
+src/cite_verify_vlm_cot/time-limits.txt

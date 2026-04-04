@@ -6,7 +6,7 @@ Experiments.py
 4. Logs everything to Phoenix (an ML observability platform)
 """
 import argparse
-
+import os
 import ast
 import gc
 import json
@@ -30,9 +30,8 @@ import traceback
 from opentelemetry import trace as otel_trace
 
 # Set environment variables before any model/library imports
-import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
+HOME_DIR = os.path.expanduser("~")
 # Shard configuration
 # Reads from CLI args, falling back to SLURM_ARRAY_TASK_ID when running as
 # a job array.  A single-node run (no args) behaves identically to before.
@@ -62,7 +61,7 @@ if not (0 <= SHARD_INDEX < NUM_SHARDS):
     raise ValueError(f"--shard {SHARD_INDEX} out of range for --num-shards {NUM_SHARDS}")
 print(f"[Shard] Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
 
-CACHE_DIR = "/fs02/home/sneharao/hf_cache"
+CACHE_DIR = os.path.join(HOME_DIR, "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
@@ -94,7 +93,7 @@ from unsloth import FastLanguageModel
 from verifier.verifier import build_cave_vlm_cot_graph
 
 # Load your data
-df = pd.read_csv("/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv")
+df = pd.read_csv(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
 # df = df.iloc[:5000]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
@@ -409,7 +408,7 @@ num_text_rows = len(df)  # rough lower bound; actual text rows = 1 per CSV row
 if _index_needs_rebuild(num_text_rows):
     from utils import build_text_index
     print("Building indexes (first run or stale index)...")
-    build_text_index("/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv")
+    build_text_index(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
     print("Indexes built!")
 
 # Load pre-built search indexes for fast retrieval
@@ -419,12 +418,6 @@ data = pd.read_csv(os.path.expanduser("~/outputs/multimodal_embeddings.csv"))
 
 # Now load all the models needed for the pipeline
 print("\nLoading models for the pipeline...")
-
-# Set cache directory
-cache_dir = "/fs01/home/sneharao/hf_cache"
-os.makedirs(cache_dir, exist_ok=True)
-os.environ["HF_HOME"] = cache_dir
-os.environ["TRANSFORMERS_CACHE"] = cache_dir
 
 # 1. Planner — Qwen2.5-7B (4-bit) — pinned to GPU0
 # GPU0 also hosts CrossEncoder and SentenceTransformer (< 2GB combined)
@@ -542,7 +535,7 @@ _DEFAULT_OUTPUT = {
     "confidence_appropriate": 0.0,
     "feedback_quality": 0.0,
 }
-DEBUG_LOG_PATH = "/fs01/home/sneharao/logs/experiments_debug.log"
+DEBUG_LOG_PATH = os.path.join(HOME_DIR, "logs/experiments_debug.log")
 
 
 def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
