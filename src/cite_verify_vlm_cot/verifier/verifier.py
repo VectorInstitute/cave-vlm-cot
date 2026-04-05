@@ -677,3 +677,133 @@ def build_cave_vlm_cot_graph(
     graph.add_conditional_edges("verify", should_plan, {"plan": "plan", END: END})
 
     return graph.compile()
+
+# Ablation graph builders
+def build_retrieval_solver_graph(
+    planner_model,
+    planner_tokenizer,
+    planner_kwargs,
+    text_index,
+    data,
+    solver_model,
+    solver_processor,
+    solver_kwargs,
+    retrieval_k=5,
+):
+    """
+    Ablation 1 — Retrieval-Solver pipeline.
+    Pipeline: Planner → Retriever → Solver → END
+    Drops citation injector and verifier to isolate the contribution of
+    post-hoc citation injection and verification to the final CaVeScore.
+    """
+    planner_node = partial(
+        planner_step,
+        model=planner_model,
+        tokenizer=planner_tokenizer,
+        kwargs=planner_kwargs,
+    )
+    retriever_node = partial(
+        retriever_step,
+        text_index=text_index,
+        data=data,
+        k=retrieval_k,
+    )
+    solver_node = partial(
+        solver_step_with_citation_retry,
+        model=solver_model,
+        processor=solver_processor,
+        kwargs=solver_kwargs,
+    )
+    graph = StateGraph(State)
+
+    graph.add_node("plan", planner_node)
+    graph.add_node("retrieve", retriever_node)
+    graph.add_node("solve", solver_node)
+
+    graph.set_entry_point("plan")
+
+    graph.add_edge("plan", "retrieve")
+    graph.add_edge("retrieve", "solve")
+    graph.add_edge("solve", END)
+
+    return graph.compile()
+
+def build_solver_only_graph(
+    solver_model,
+    solver_processor,
+    solver_kwargs,
+):
+    """
+    Ablation 2 — Solver-only pipeline.
+    Pipeline: Solver → END
+    The solver receives no retrieved evidence (state.retrieved_chunks == {})
+    and no citations are injected, so the model must answer from question text
+    and question images alone.  Useful as a RAG-vs-no-RAG baseline.
+    """
+    solver_node = partial(
+        solver_step_with_citation_retry,
+        model=solver_model,
+        processor=solver_processor,
+        kwargs=solver_kwargs,
+    )
+
+    graph = StateGraph(State)
+    graph.add_node("solve", solver_node)
+    graph.set_entry_point("solve")
+    graph.add_edge("solve", END)
+    return graph.compile()
+
+def build_pipeline_without_citation_injector(
+    planner_model,
+    planner_tokenizer,
+    planner_kwargs,
+    text_index,
+    data,
+    solver_model,
+    solver_processor,
+    solver_kwargs,
+    verifier_model,
+    verifier_processor,
+    retrieval_k=5,
+):
+    """
+    Ablation 3 — Full pipeline without citation injector.
+    Pipeline: Planner → Retriever → Solver → Verifier → (retry loop)
+    Skips the inject_citations step to measure how much post-hoc citation
+    injection improves citation precision, recall, and the composite CaVeScore
+    compared to the citations the solver produces on its own.
+    """
+    planner_node = partial(
+        planner_step,
+        model=planner_model,
+        tokenizer=planner_tokenizer,
+        kwargs=planner_kwargs,
+    )
+    retriever_node = partial(
+        retriever_step,
+        text_index=text_index,
+        data=data,
+        k=retrieval_k,
+    )
+    solver_node = partial(
+        solver_step_with_citation_retry,
+        model=solver_model,
+        processor=solver_processor,
+        kwargs=solver_kwargs,
+    )
+    verifier_node = _conditional_verifier_step(verifier_model, verifier_processor)
+    graph = StateGraph(State)
+
+    graph.add_node("plan", planner_node)
+    graph.add_node("retrieve", retriever_node)
+    graph.add_node("solve", solver_node)
+    graph.add_node("verify", verifier_node)
+
+    graph.set_entry_point("plan")
+    
+    graph.add_edge("plan", "retrieve")
+    graph.add_edge("retrieve", "solve")
+    # Solver output goes directly to verifier — no citation injection.
+    graph.add_edge("solve", "verify")
+    graph.add_conditional_edges("verify", should_plan, {"plan": "plan", END: END})
+    return graph.compile()

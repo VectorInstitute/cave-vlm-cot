@@ -33,6 +33,8 @@ from solver.solver_evals import (
     compute_cave_score,
     compute_combined_metrics,
     citation_summary,
+    WEIGHT_CONFIGS,
+    run_weight_sensitivity_analysis,
 )
 from verifier.verifier_evals import (
     evaluate_verifier_quality,

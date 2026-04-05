@@ -49,6 +49,35 @@ _parser.add_argument("--shard",      type=int, default=None,
                      help="0-based shard index to process")
 _parser.add_argument("--num-shards", type=int, default=1,
                      help="Total number of shards (default: 1 = no sharding)")
+
+# Ablation / experiment selection
+_parser.add_argument(
+    "--pipeline",
+    type=str,
+    default="full",
+    choices=["full", "retrieval-solver", "solver-only", "no-citation-injector"],
+    help=(
+        "Pipeline variant to run.\n"
+        "  full                   — complete pipeline (default)\n"
+        "  retrieval-solver       — Ablation 1: Planner→Retriever→Solver only\n"
+        "  solver-only            — Ablation 2: Solver only (no retrieval/verifier)\n"
+        "  no-citation-injector   — Ablation 3: full pipeline minus inject_citations"
+    ),
+)
+_parser.add_argument(
+    "--model-variant",
+    type=str,
+    default="qwen25",
+    choices=["qwen25", "qwen3"],
+    help=(
+        "Model family for the extractor (planner) and verifier.\n"
+        "  qwen25 — Qwen2.5-7B-Instruct (planner) + Qwen2.5-VL-7B-Instruct (verifier) [default]\n"
+        "  qwen3  — Qwen3-8B-Instruct   (planner) + Qwen3-VL-7B-Instruct   (verifier)\n"
+        "           NOTE: Qwen3-VL availability depends on your transformers version.\n"
+        "           Verify model IDs at https://huggingface.co/Qwen before running."
+    ),
+)
+
 _args, _ = _parser.parse_known_args()
 # SLURM_ARRAY_TASK_ID takes precedence when --shard is not supplied explicitly
 _slurm_task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", -1))
@@ -56,10 +85,15 @@ SHARD_INDEX = _args.shard if _args.shard is not None else (
     _slurm_task_id if _slurm_task_id >= 0 else 0
 )
 NUM_SHARDS = _args.num_shards if _slurm_task_id < 0 else max(_args.num_shards, _slurm_task_id + 1)
+PIPELINE_MODE  = _args.pipeline        # "full" | "retrieval-solver" | "solver-only" | "no-citation-injector"
+MODEL_VARIANT  = _args.model_variant   # "qwen25" | "qwen3"
+
 # Validate
 if not (0 <= SHARD_INDEX < NUM_SHARDS):
     raise ValueError(f"--shard {SHARD_INDEX} out of range for --num-shards {NUM_SHARDS}")
-print(f"[Shard] Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
+print(f"[Shard]    Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
+print(f"[Pipeline] {PIPELINE_MODE}")
+print(f"[Models]   extractor/verifier variant: {MODEL_VARIANT}")
 
 CACHE_DIR = os.path.join(HOME_DIR, "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -90,7 +124,12 @@ from phoenix.client import Client
 from utils import State, safe_str, safe_parse_json
 from transformers import AutoProcessor, MllamaForConditionalGeneration
 from unsloth import FastLanguageModel
-from verifier.verifier import build_cave_vlm_cot_graph
+from verifier.verifier import (
+    build_cave_vlm_cot_graph,
+    build_retrieval_solver_graph,
+    build_solver_only_graph,
+    build_pipeline_without_citation_injector,
+)
 
 # Load your data
 df = pd.read_csv(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
@@ -416,19 +455,45 @@ print("Loading indexes...")
 text_index = faiss.read_index(os.path.expanduser("~/outputs/text_index.faiss"))
 data = pd.read_csv(os.path.expanduser("~/outputs/multimodal_embeddings.csv"))
 
-# Now load all the models needed for the pipeline
+# Model loading — conditional on pipeline mode and model variant
+#  PIPELINE           planner    solver    verifier
+#  full               ✓          ✓         ✓
+#  retrieval-solver   ✓          ✓         ✗
+#  solver-only        ✗          ✓         ✗
+#  no-citation-inj.   ✓          ✓         ✓
+_needs_planner  = PIPELINE_MODE != "solver-only"
+_needs_verifier = PIPELINE_MODE in ("full", "no-citation-injector")
+
 print("\nLoading models for the pipeline...")
 
-# 1. Planner — Qwen2.5-7B (4-bit) — pinned to GPU0
+# 1. Planner
 # GPU0 also hosts CrossEncoder and SentenceTransformer (< 2GB combined)
-print("1. Loading Qwen2.5-7B for Planner...")
-planner_model, planner_tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
-    max_seq_length=4096,
-    load_in_4bit=True,
-)
-FastLanguageModel.for_inference(planner_model)
-planner_kwargs = dict(do_sample=False, max_new_tokens=128)
+# Qwen2.5 variant : unsloth/Qwen2.5-7B-Instruct-bnb-4bit  (7 B, GPU 0)
+# Qwen3   variant : unsloth/Qwen3-8B-bnb-4bit              (8 B, GPU 0)
+#   • Qwen3 uses 8 B as its base size; confirm the exact Unsloth hub ID at
+#     https://huggingface.co/unsloth before running.
+#   • Qwen3 supports a "thinking" mode; for deterministic ablation output keep
+#     do_sample=False and ensure the tokenizer chat template does NOT inject
+#     <think> tokens (pass enable_thinking=False if the template supports it).
+if _needs_planner:
+    if MODEL_VARIANT == "qwen3":
+        _planner_model_id = "unsloth/Qwen3-8B-bnb-4bit"
+        print(f"1. Loading Qwen3-8B for Planner (variant=qwen3)...")
+    else:
+        _planner_model_id = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
+        print(f"1. Loading Qwen2.5-7B for Planner (variant=qwen25)...")
+
+    planner_model, planner_tokenizer = FastLanguageModel.from_pretrained(
+        model_name=_planner_model_id,
+        max_seq_length=4096,
+        load_in_4bit=True,
+    )
+    FastLanguageModel.for_inference(planner_model)
+    planner_kwargs = dict(do_sample=False, max_new_tokens=128)
+else:
+    print("1. Skipping Planner model (not needed for solver-only pipeline)")
+    planner_model = planner_tokenizer = None
+    planner_kwargs = {}
 
 # 2. Solver — Llama-3.2V-11B — pinned to GPU1 (~22GB bfloat16, leaves 58GB headroom)
 print("2. Loading Llama-3.2V-11B for Solver...")
@@ -451,53 +516,121 @@ solver_kwargs = dict(do_sample=False, max_new_tokens=1024)
 # , temperature=0.1, top_p=0.95
 
 # 3. Verifier — Qwen2.5-VL-7B — pinned to GPU2 (~15GB, leaves 65GB headroom)
-print("3. Loading Qwen2.5-VL-7B for Verifier...")
+# Qwen2.5 variant : Qwen/Qwen2.5-VL-7B-Instruct  (GPU 2)
+# Qwen3   variant : Qwen/Qwen3-VL-7B-Instruct     (GPU 2)
+#   • Qwen3-VL requires transformers ≥ 4.52 with Qwen3VLForConditionalGeneration.
+#     If unavailable, the fallback chain below will warn and use Qwen2_5_VL.
+#   • Verify the exact hub ID at https://huggingface.co/Qwen before running.
+if _needs_verifier:
+    if MODEL_VARIANT == "qwen3":
+        _verifier_model_id = "Qwen/Qwen3-VL-7B-Instruct"
+        print(f"3. Loading Qwen3-VL-7B for Verifier (variant=qwen3)...")
+    else:
+        _verifier_model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+        print(f"3. Loading Qwen2.5-VL-7B for Verifier (variant=qwen25)...")
 
-# Processor first (lightweight) so it's always defined even if model load fails
-verifier_processor = AutoProcessor.from_pretrained(
-    "Qwen/Qwen2.5-VL-7B-Instruct",
-    min_pixels=256 * 28 * 28,
-    max_pixels=1280 * 28 * 28,
-)
-
-# Qwen2.5-VL checkpoint requires the 2.5 model class; older transformers only have Qwen2VL (causes token/feature mismatch)
-try:
-    from transformers import Qwen2_5_VLForConditionalGeneration
-    VerifierModelClass = Qwen2_5_VLForConditionalGeneration
-except ImportError:
-    from transformers import Qwen2VLForConditionalGeneration
-    VerifierModelClass = Qwen2VLForConditionalGeneration
-    print(
-        "WARNING: Qwen2_5_VLForConditionalGeneration not found. "
-        "Using Qwen2VLForConditionalGeneration instead. "
-        "Upgrade with: pip install git+https://github.com/huggingface/transformers"
+    verifier_processor = AutoProcessor.from_pretrained(
+        _verifier_model_id,
+        min_pixels=256 * 28 * 28,
+        max_pixels=1280 * 28 * 28,
     )
 
-verifier_model = VerifierModelClass.from_pretrained(
-    "Qwen/Qwen2.5-VL-7B-Instruct",
-    torch_dtype=torch.bfloat16,
-    device_map={"": "cuda:2"},   # pin to GPU2
-    cache_dir=CACHE_DIR,
-    ignore_mismatched_sizes=True,
-)
+    # Model class resolution: prefer the newest available class for each variant.
+    # Fallback chain ensures backward compatibility with older transformers installs.
+    VerifierModelClass = None
+    if MODEL_VARIANT == "qwen3":
+        try:
+            from transformers import Qwen3VLForConditionalGeneration
+            VerifierModelClass = Qwen3VLForConditionalGeneration
+        except ImportError:
+            print(
+                "WARNING: Qwen3VLForConditionalGeneration not found — "
+                "falling back to Qwen2_5_VLForConditionalGeneration. "
+                "Upgrade transformers: pip install --upgrade transformers"
+            )
+
+    if VerifierModelClass is None:
+        try:
+            from transformers import Qwen2_5_VLForConditionalGeneration
+            VerifierModelClass = Qwen2_5_VLForConditionalGeneration
+        except ImportError:
+            from transformers import Qwen2VLForConditionalGeneration
+            VerifierModelClass = Qwen2VLForConditionalGeneration
+            print(
+                "WARNING: Qwen2_5_VLForConditionalGeneration not found. "
+                "Using Qwen2VLForConditionalGeneration as last-resort fallback. "
+                "Upgrade with: pip install git+https://github.com/huggingface/transformers"
+            )
+
+    verifier_model = VerifierModelClass.from_pretrained(
+        _verifier_model_id,
+        torch_dtype=torch.bfloat16,
+        device_map={"": "cuda:2"},
+        cache_dir=CACHE_DIR,
+        ignore_mismatched_sizes=True,
+    )
+else:
+    print("3. Skipping Verifier model (not needed for this pipeline)")
+    verifier_model = verifier_processor = None
 
 print("\n All models loaded successfully!")
 
-# Build the complete graph with all dependencies
-print("\nBuilding CaVe-VLM-CoT graph...")
-cave_vlm_cot_app = build_cave_vlm_cot_graph(
-    planner_model=planner_model,
-    planner_tokenizer=planner_tokenizer,
-    planner_kwargs=planner_kwargs,
-    text_index=text_index,
-    data=data,
-    solver_model=solver_model,
-    solver_processor=solver_processor,
-    solver_kwargs=solver_kwargs,
-    verifier_model=verifier_model,
-    verifier_processor=verifier_processor,
-    retrieval_k=5,
-)
+# Build the graph matching the requested pipeline mode
+print(f"\nBuilding graph: pipeline={PIPELINE_MODE}, model_variant={MODEL_VARIANT} ...")
+
+if PIPELINE_MODE == "full":
+    cave_vlm_cot_app = build_cave_vlm_cot_graph(
+        planner_model=planner_model,
+        planner_tokenizer=planner_tokenizer,
+        planner_kwargs=planner_kwargs,
+        text_index=text_index,
+        data=data,
+        solver_model=solver_model,
+        solver_processor=solver_processor,
+        solver_kwargs=solver_kwargs,
+        verifier_model=verifier_model,
+        verifier_processor=verifier_processor,
+        retrieval_k=5,
+    )
+
+elif PIPELINE_MODE == "retrieval-solver":
+    cave_vlm_cot_app = build_retrieval_solver_graph(
+        planner_model=planner_model,
+        planner_tokenizer=planner_tokenizer,
+        planner_kwargs=planner_kwargs,
+        text_index=text_index,
+        data=data,
+        solver_model=solver_model,
+        solver_processor=solver_processor,
+        solver_kwargs=solver_kwargs,
+        retrieval_k=5,
+    )
+
+elif PIPELINE_MODE == "solver-only":
+    cave_vlm_cot_app = build_solver_only_graph(
+        solver_model=solver_model,
+        solver_processor=solver_processor,
+        solver_kwargs=solver_kwargs,
+    )
+
+elif PIPELINE_MODE == "no-citation-injector":
+    cave_vlm_cot_app = build_pipeline_without_citation_injector(
+        planner_model=planner_model,
+        planner_tokenizer=planner_tokenizer,
+        planner_kwargs=planner_kwargs,
+        text_index=text_index,
+        data=data,
+        solver_model=solver_model,
+        solver_processor=solver_processor,
+        solver_kwargs=solver_kwargs,
+        verifier_model=verifier_model,
+        verifier_processor=verifier_processor,
+        retrieval_k=5,
+    )
+
+else:
+    raise ValueError(f"Unknown --pipeline value: {PIPELINE_MODE!r}")
+    
 print(" Graph compiled and ready!")
 
 # Default output dict used on error — keeps Phoenix from seeing missing keys
@@ -704,8 +837,14 @@ experiment_with_verifier = experiments_client.experiments.run_experiment(
     dataset=cave_dataset,
     task=cave_vlm_cot_with_verifier_task,
     evaluators=ALL_EVALUATORS,
-    experiment_name=f"CaVe-VLM-CoT-v1-shard{SHARD_INDEX}-of-{NUM_SHARDS}",
-    experiment_description="Full pipeline with verification and retry loop. Max 3 attempts per question.",
+    experiment_name=(
+        f"CaVe-VLM-CoT-{PIPELINE_MODE}-{MODEL_VARIANT}"
+        f"-shard{SHARD_INDEX}-of-{NUM_SHARDS}"
+    ),
+    experiment_description=(
+        f"Pipeline: {PIPELINE_MODE} | Models: {MODEL_VARIANT} | "
+        f"Shard {SHARD_INDEX+1}/{NUM_SHARDS}"
+    ),
 )
 
 print("\nExperiment complete — results saved to Phoenix.")

@@ -666,11 +666,99 @@ def evidence_grounding_check(state) -> dict:
         'answer_claim': answer_claim,
     }
 
-def compute_cave_score(state, skip_nli=False, skip_clip=False, skip_ais=False) -> dict:
+# Experiment 4: CaVeScore weight configurations for sensitivity analysis.
+# Each entry is a dict with keys matching the five CaVeScore components.
+# Weights within each config must sum to 1.0.
+# WEIGHT_CONFIGS dict with 7 named configurations — default, accuracy-heavy, citation-heavy, 
+# uniform, AIS-heavy, grounding-heavy, recall-skewed, all summing to 1.0.
+
+WEIGHT_CONFIGS: Dict[str, Dict[str, float]] = {
+    # Default (published weights)
+    "default": {
+        "accuracy": 0.4,
+        "citation_precision": 0.2,
+        "citation_recall": 0.2,
+        "ais": 0.1,
+        "grounding": 0.1,
+    },
+
+    # Heavy emphasis on correctness — treats citation quality as secondary
+    "accuracy_heavy": {
+        "accuracy": 0.6,
+        "citation_precision": 0.1,
+        "citation_recall": 0.1,
+        "ais": 0.1,
+        "grounding": 0.1,
+    },
+
+    # Heavy emphasis on citation quality — penalises uncited claims strongly
+    "citation_heavy": {
+        "accuracy": 0.2,
+        "citation_precision": 0.3,
+        "citation_recall": 0.3,
+        "ais": 0.1,
+        "grounding": 0.1,
+    },
+
+    # Uniform — no component is privileged
+    "uniform": {
+        "accuracy": 0.2,
+        "citation_precision": 0.2,
+        "citation_recall": 0.2,
+        "ais": 0.2,
+        "grounding": 0.2,
+    },
+
+    # AIS-heavy — emphasises neural attribution quality
+    "ais_heavy": {
+        "accuracy": 0.3,
+        "citation_precision": 0.15,
+        "citation_recall": 0.15,
+        "ais": 0.25,
+        "grounding": 0.15,
+    },
+
+    # Grounding-heavy — penalises answers unsupported by cited passages
+    "grounding_heavy": {
+        "accuracy": 0.3,
+        "citation_precision": 0.15,
+        "citation_recall": 0.15,
+        "ais": 0.15,
+        "grounding": 0.25,
+    },
+
+    # Recall-skewed — prioritises coverage of factual claims with citations
+    "recall_skewed": {
+        "accuracy": 0.35,
+        "citation_precision": 0.1,
+        "citation_recall": 0.35,
+        "ais": 0.1,
+        "grounding": 0.1,
+    },
+}
+
+def compute_cave_score(
+    state,
+    skip_nli: bool = False,
+    skip_clip: bool = False,
+    skip_ais: bool = False,
+    weights: Optional[Dict[str, float]] = None,
+) -> dict:
     """
     Compute the combined CaVeScore for solver evaluation.
-    
-    CaVeScore = 0.4*Accuracy + 0.2*CitePrecision + 0.2*CiteRecall + 0.1*AIS + 0.1*Grounding
+
+    Default formula:
+        CaVeScore = 0.4*Accuracy + 0.2*CitePrecision + 0.2*CiteRecall
+                    + 0.1*AIS + 0.1*Grounding
+
+    Pass ``weights`` to override the default configuration, e.g.::
+
+        from solver.solver_evals import WEIGHT_CONFIGS
+        result = compute_cave_score(state, weights=WEIGHT_CONFIGS["uniform"])
+
+    The ``weights`` dict must contain the five keys: accuracy,
+    citation_precision, citation_recall, ais, grounding.  Values must sum
+    to 1.0 (enforced via assertion).
     """
     # Accuracy
     accuracy = final_answer_accuracy(state)
@@ -753,13 +841,23 @@ def compute_cave_score(state, skip_nli=False, skip_clip=False, skip_ais=False) -
     num_claims = max(1, len(factual_sentences))
     cite_recall = min(1.0, num_citations / num_claims)
     
-    # CaVeScore (updated weights to include grounding)
+    # Resolve weights — fall back to published defaults when not supplied.
+    if weights is None:
+        weights = WEIGHT_CONFIGS["default"]
+    _required_keys = {"accuracy", "citation_precision", "citation_recall", "ais", "grounding"}
+    assert _required_keys == set(weights.keys()), (
+        f"weights dict must contain exactly {_required_keys}, got {set(weights.keys())}"
+    )
+    _weight_sum = sum(weights.values())
+    assert abs(_weight_sum - 1.0) < 1e-6, f"weights must sum to 1.0, got {_weight_sum:.6f}"
+
+    # CaVeScore
     cave_score = (
-        0.4 * accuracy +
-        0.2 * cite_precision +
-        0.2 * cite_recall +
-        0.1 * ais  +
-        0.1 * grounding_score
+        weights["accuracy"]           * accuracy +
+        weights["citation_precision"] * cite_precision +
+        weights["citation_recall"]    * cite_recall +
+        weights["ais"]                * ais +
+        weights["grounding"]          * grounding_score
     )
 
     # Count question images
@@ -781,6 +879,99 @@ def compute_cave_score(state, skip_nli=False, skip_clip=False, skip_ais=False) -
         'qi_citation_count': qi_coverage_result['qi_citation_count'],
         'num_question_images': num_question_images,
     }
+
+# Experiment 4: Weight sensitivity analysis helpers
+def _cave_score_from_components(
+    components: Dict[str, float],
+    weights: Dict[str, float],
+) -> float:
+    """
+    Compute a single CaVeScore from pre-extracted metric components and a
+    weight configuration dict.
+
+    ``components`` must have keys: accuracy, citation_precision,
+    citation_recall, ais, grounding_score.
+    ``weights`` must have keys: accuracy, citation_precision, citation_recall,
+    ais, grounding  (note: grounding_score → grounding in the weight key).
+    """
+    return (
+        weights["accuracy"]           * components["accuracy"] +
+        weights["citation_precision"] * components["citation_precision"] +
+        weights["citation_recall"]    * components["citation_recall"] +
+        weights["ais"]                * components["ais"] +
+        weights["grounding"]          * components["grounding_score"]
+    )
+
+
+def run_weight_sensitivity_analysis(
+    cave_results: List[Dict[str, float]],
+    configs: Optional[Dict[str, Dict[str, float]]] = None,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Re-score a list of pre-computed CaVeScore component dicts under every
+    named weight configuration and return aggregate statistics.
+
+    Parameters
+    ----------
+    cave_results : list of dict
+        Each dict is the return value of ``compute_cave_score(state)`` for one
+        sample — it must contain the keys accuracy, citation_precision,
+        citation_recall, ais, and grounding_score.
+    configs : dict, optional
+        Named weight configurations to evaluate.  Defaults to
+        ``WEIGHT_CONFIGS`` (all seven built-in configurations).
+
+    Returns
+    -------
+    dict
+        Keyed by config name.  Each value is a dict with:
+            mean_cave_score   – mean CaVeScore across all samples
+            std_cave_score    – standard deviation
+            min_cave_score    – minimum per-sample score
+            max_cave_score    – maximum per-sample score
+            delta_vs_default  – difference in mean score vs the "default" config
+            weights           – the weight dict used
+            n_samples         – number of samples evaluated
+
+    Example
+    -------
+    >>> results = [compute_cave_score(s) for s in state_list]
+    >>> summary = run_weight_sensitivity_analysis(results)
+    >>> for cfg_name, stats in summary.items():
+    ...     print(f"{cfg_name:20s}  mean={stats['mean_cave_score']:.4f}"
+    ...           f"  Δdefault={stats['delta_vs_default']:+.4f}")
+    """
+    import statistics
+
+    if configs is None:
+        configs = WEIGHT_CONFIGS
+
+    if not cave_results:
+        raise ValueError("cave_results is empty — pass at least one sample dict.")
+
+    analysis: Dict[str, Dict[str, Any]] = {}
+
+    for config_name, weights in configs.items():
+        scores = [
+            _cave_score_from_components(r, weights)
+            for r in cave_results
+        ]
+        analysis[config_name] = {
+            "mean_cave_score": statistics.mean(scores),
+            "std_cave_score":  statistics.stdev(scores) if len(scores) > 1 else 0.0,
+            "min_cave_score":  min(scores),
+            "max_cave_score":  max(scores),
+            "delta_vs_default": 0.0,  # filled in below
+            "weights":         weights,
+            "n_samples":       len(scores),
+        }
+
+    # Compute Δ relative to the default configuration.
+    default_mean = analysis.get("default", {}).get("mean_cave_score", 0.0)
+    for stats in analysis.values():
+        stats["delta_vs_default"] = stats["mean_cave_score"] - default_mean
+
+    return analysis
 
 def compute_combined_metrics(state, skip_clip: bool = True) -> Dict:
     """
