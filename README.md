@@ -1,6 +1,6 @@
 # CaVe-VLM-CoT: An Interpretable Vision-Language Model Framework
 
-A five-stage agentic RAG pipeline for grounded multimodal reasoning on science QA. Every answer is backed by cited evidence and verified by a second VLM before being returned — with an automatic feedback loop that retries retrieval when hallucinations are detected.
+A five-stage multi-stage agentic pipeline for grounded multimodal reasoning on science QA. Every answer is backed by cited evidence and verified by a second VLM before being returned — with an automatic feedback loop that retries retrieval when hallucinations are detected.
 
 ---
 
