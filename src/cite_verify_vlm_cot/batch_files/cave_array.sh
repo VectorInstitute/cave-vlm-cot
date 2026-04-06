@@ -1,26 +1,26 @@
 #!/bin/bash
 # cave_array.slurm — CaVe-VLM-CoT: all ablations, all shards, one submission
 #
-# Launches 5 experiments × 5 shards = 25 SLURM array tasks.
+# Launches 4 experiments × 5 shards = 20 SLURM array tasks.
 # Each task owns 4 RTX-6000 GPUs and processes 1/5 of scienceqa_augmented.csv.
 #
-#   Task ID │ EXPERIMENT_ID │ SHARD │ --pipeline                │ --model-variant
+#   Task ID │ EXPERIMENT_ID │ SHARD │ --pipeline                │ Notes
 #   ────────┼───────────────┼───────┼───────────────────────────┼────────────────
-#     0– 4  │      0        │  0–4  │ full                      │ qwen25  (baseline)
-#     5– 9  │      1        │  0–4  │ retrieval-solver          │ qwen25  (ablation 1)
-#    10–14  │      2        │  0–4  │ solver-only               │ qwen25  (ablation 2)
-#    15–19  │      3        │  0–4  │ no-citation-injector      │ qwen25  (ablation 3)
-#    20–24  │      4        │  0–4  │ full                      │ qwen3   (ablation 5)
+#     0– 4  │      0        │  0–4  │ full                      │ baseline
+#     5– 9  │      1        │  0–4  │ retrieval-solver          │ ablation 1
+#    10–14  │      2        │  0–4  │ solver-only               │ ablation 2
+#    15–19  │      3        │  0–4  │ no-citation-injector      │ ablation 3
 #
-# Experiment 4 (weight sensitivity) is a CPU post-processing step.
-# It runs automatically on the last shard of every experiment group
-# (task IDs 4, 9, 14, 19, 24) once the pipeline job exits cleanly.
+# Experiment 4 (weight sensitivity) runs as a separate downstream job
+# via cave_postprocess.sh after all array tasks complete:
+#   ARRAY_JOB_ID=$(sbatch --parsable cave_array.sh)
+#   sbatch --dependency=afterok:${ARRAY_JOB_ID} cave_postprocess.sh
 #
 # Submit everything:
 #   sbatch cave_array.slurm
 #
-# Submit only specific tasks (e.g. baseline + qwen3):
-#   sbatch --array=0-4,20-24 cave_array.slurm
+# Submit only specific tasks (e.g. baseline only):
+#   sbatch --array=0-4 cave_array.slurm
 #
 # Resume a failed shard (e.g. task 7):
 #   sbatch --array=7 cave_array.slurm
@@ -30,7 +30,7 @@
 #   tail -f logs/cave_<jobid>_<taskid>.out
 
 #SBATCH --job-name=cave-vlm-cot
-#SBATCH --array=0-24                  # 25 tasks: 5 experiments × 5 shards
+#SBATCH --array=0-19                  # 20 tasks: 4 experiments × 5 shards
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
@@ -57,8 +57,8 @@ OUTDIR=${WORKDIR}/outputs
 mkdir -p "${LOGDIR}" "${OUTDIR}"
 
 # Derive experiment config and shard from flat task ID
-#   SLURM_ARRAY_TASK_ID: 0–24 (flat)
-#   EXPERIMENT_ID:       0–4  (which experiment group)
+#   SLURM_ARRAY_TASK_ID: 0–19 (flat)
+#   EXPERIMENT_ID:       0–3  (which experiment group)
 #   SHARD_ID:            0–4  (which fifth of the dataset)
 TASK_ID=${SLURM_ARRAY_TASK_ID}
 NUM_SHARDS=5
@@ -72,27 +72,16 @@ PIPELINES=(
     "retrieval-solver"        # 1  ablation 1: no citation injector / verifier
     "solver-only"             # 2  ablation 2: no retrieval at all
     "no-citation-injector"    # 3  ablation 3: full pipeline minus citation_injector
-    "full"                    # 4  ablation 4: Qwen3 extractor + verifier
-)
-
-MODEL_VARIANTS=(
-    "qwen25"   # 0
-    "qwen25"   # 1
-    "qwen25"   # 2
-    "qwen25"   # 3
-    "qwen3"    # 4
 )
 
 EXPERIMENT_LABELS=(
-    "baseline-full-qwen25"           # 0
+    "baseline-full"           # 0
     "ablation1-retrieval-solver"     # 1
     "ablation2-solver-only"          # 2
     "ablation3-no-citation-injector" # 3
-    "ablation5-full-qwen3"           # 4
 )
 
 PIPELINE="${PIPELINES[$EXPERIMENT_ID]}"
-MODEL_VARIANT="${MODEL_VARIANTS[$EXPERIMENT_ID]}"
 EXP_LABEL="${EXPERIMENT_LABELS[$EXPERIMENT_ID]}"
 
 # Modules
@@ -132,7 +121,6 @@ echo "  CaVe-VLM-CoT experiment run"
 echo "  Task ID      : ${TASK_ID}  (experiment ${EXPERIMENT_ID}, shard ${SHARD_ID})"
 echo "  Experiment   : ${EXP_LABEL}"
 echo "  Pipeline     : ${PIPELINE}"
-echo "  Model variant: ${MODEL_VARIANT}"
 echo "  Shard        : ${SHARD_ID} / $((NUM_SHARDS - 1))"
 echo "  Host         : $(hostname)"
 echo "  Started      : $(date)"
@@ -180,7 +168,7 @@ find "${LOGDIR}" -name "cave_*_${EXP_LABEL}*" -type f \
     | xargs rm -f 2>/dev/null || true
 
 # Main experiment
-# --shard is passed explicitly because SLURM_ARRAY_TASK_ID is now 0–24
+# --shard is passed explicitly because SLURM_ARRAY_TASK_ID is now 0–19
 # (the flat task index), not 0–4 (the shard index).  Without this flag,
 # experiments.py would read SLURM_ARRAY_TASK_ID=7 and try shard 7 of 5
 # and crash.
@@ -191,7 +179,6 @@ python -u experiments.py          \
     --num-shards    "${NUM_SHARDS}"      \
     --shard         "${SHARD_ID}"        \
     --pipeline      "${PIPELINE}"        \
-    --model-variant "${MODEL_VARIANT}"   \
     2>"${LOGDIR}/cave_${SLURM_JOB_ID}_${SHARD_ID}.err" \
     | grep -Ev "it/s|B/s|%\||\[.*\].*ETA|Downloading|Loading" \
     > "${LOGDIR}/cave_${SLURM_JOB_ID}_${SHARD_ID}.out"
@@ -199,44 +186,6 @@ python -u experiments.py          \
 EXIT_CODE=$?
 echo ""
 echo "Shard ${SHARD_ID} (task ${TASK_ID}) finished at $(date) with exit code ${EXIT_CODE}"
-
-# Weight sensitivity analysis (Experiment 4)
-# Runs only on the LAST shard of each experiment group (SHARD_ID == 4) so it
-# executes exactly once per experiment, with no separate sbatch dependency.
-# Expects aggregate_shards.py to have merged the 5 per-shard outputs into:
-#   outputs/cave_results_<EXP_LABEL>.json
-# If you run aggregate_shards.py in a separate downstream job, remove this
-# block and call sensitivity_analysis.py manually after aggregation.
-if [ "${SHARD_ID}" -eq "${LAST_SHARD}" ] && [ "${EXIT_CODE}" -eq 0 ]; then
-    RESULTS_FILE="${OUTDIR}/cave_results_${EXP_LABEL}.json"
-
-    echo ""
-    echo "  Experiment 4: weight sensitivity analysis"
-    echo "  Experiment   : ${EXP_LABEL}"
-    echo "  Looking for  : ${RESULTS_FILE}"
-
-    if [ -f "${RESULTS_FILE}" ]; then
-        python sensitivity_analysis.py     \
-            --results-file "${RESULTS_FILE}"   \
-            --out-dir      "${OUTDIR}"
-
-        # Namespace outputs so parallel experiments do not overwrite each other
-        mv "${OUTDIR}/weight_sensitivity.json" \
-           "${OUTDIR}/weight_sensitivity_${EXP_LABEL}.json"
-        mv "${OUTDIR}/weight_sensitivity.csv"  \
-           "${OUTDIR}/weight_sensitivity_${EXP_LABEL}.csv"
-
-        echo "  Sensitivity analysis complete."
-        echo "  → ${OUTDIR}/weight_sensitivity_${EXP_LABEL}.json"
-        echo "  → ${OUTDIR}/weight_sensitivity_${EXP_LABEL}.csv"
-    else
-        echo "  NOTE: ${RESULTS_FILE} not found — skipping sensitivity analysis."
-        echo "  Run aggregate_shards.py first, then:"
-        echo "    python sensitivity_analysis.py --results-file ${RESULTS_FILE}"
-    fi
-fi
-
-echo ""
 echo "  Task ${TASK_ID} (${EXP_LABEL}, shard ${SHARD_ID}) done — exit ${EXIT_CODE}"
 
 exit "${EXIT_CODE}"

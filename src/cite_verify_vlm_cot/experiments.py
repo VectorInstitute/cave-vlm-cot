@@ -64,19 +64,6 @@ _parser.add_argument(
         "  no-citation-injector   — Ablation 3: full pipeline minus inject_citations"
     ),
 )
-_parser.add_argument(
-    "--model-variant",
-    type=str,
-    default="qwen25",
-    choices=["qwen25", "qwen3"],
-    help=(
-        "Model family for the extractor (planner) and verifier.\n"
-        "  qwen25 — Qwen2.5-7B-Instruct (planner) + Qwen2.5-VL-7B-Instruct (verifier) [default]\n"
-        "  qwen3  — Qwen3-8B-Instruct   (planner) + Qwen3-VL-7B-Instruct   (verifier)\n"
-        "           NOTE: Qwen3-VL availability depends on your transformers version.\n"
-        "           Verify model IDs at https://huggingface.co/Qwen before running."
-    ),
-)
 
 _args, _ = _parser.parse_known_args()
 # SLURM_ARRAY_TASK_ID takes precedence when --shard is not supplied explicitly
@@ -86,7 +73,7 @@ SHARD_INDEX = _args.shard if _args.shard is not None else (
 )
 NUM_SHARDS = _args.num_shards if _slurm_task_id < 0 else max(_args.num_shards, _slurm_task_id + 1)
 PIPELINE_MODE  = _args.pipeline        # "full" | "retrieval-solver" | "solver-only" | "no-citation-injector"
-MODEL_VARIANT  = _args.model_variant   # "qwen25" | "qwen3"
+MODEL_VARIANT  = "qwen3"              # Qwen3 is now the only supported model family
 
 # Validate
 if not (0 <= SHARD_INDEX < NUM_SHARDS):
@@ -468,7 +455,7 @@ print("\nLoading models for the pipeline...")
 
 # 1. Planner
 # GPU0 also hosts CrossEncoder and SentenceTransformer (< 2GB combined)
-# Qwen2.5 variant : unsloth/Qwen2.5-7B-Instruct-bnb-4bit  (7 B, GPU 0)
+# Qwen3-8B (planner) — pinned to GPU 0
 # Qwen3   variant : unsloth/Qwen3-8B-bnb-4bit              (8 B, GPU 0)
 #   • Qwen3 uses 8 B as its base size; confirm the exact Unsloth hub ID at
 #     https://huggingface.co/unsloth before running.
@@ -476,12 +463,8 @@ print("\nLoading models for the pipeline...")
 #     do_sample=False and ensure the tokenizer chat template does NOT inject
 #     <think> tokens (pass enable_thinking=False if the template supports it).
 if _needs_planner:
-    if MODEL_VARIANT == "qwen3":
-        _planner_model_id = "unsloth/Qwen3-8B-bnb-4bit"
-        print(f"1. Loading Qwen3-8B for Planner (variant=qwen3)...")
-    else:
-        _planner_model_id = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
-        print(f"1. Loading Qwen2.5-7B for Planner (variant=qwen25)...")
+    _planner_model_id = "unsloth/Qwen3-8B-bnb-4bit"
+    print(f"1. Loading Qwen3-8B for Planner...")
 
     planner_model, planner_tokenizer = FastLanguageModel.from_pretrained(
         model_name=_planner_model_id,
@@ -515,19 +498,13 @@ solver_processor = AutoProcessor.from_pretrained(solver_model_id)
 solver_kwargs = dict(do_sample=False, max_new_tokens=1024)
 # , temperature=0.1, top_p=0.95
 
-# 3. Verifier — Qwen2.5-VL-7B — pinned to GPU2 (~15GB, leaves 65GB headroom)
-# Qwen2.5 variant : Qwen/Qwen2.5-VL-7B-Instruct  (GPU 2)
-# Qwen3   variant : Qwen/Qwen3-VL-7B-Instruct     (GPU 2)
+# 3. Verifier — Qwen3-VL-7B — pinned to GPU2 (~15GB, leaves 65GB headroom)
+# Qwen3   variant : Qwen/Qwen3-VL-8B-Instruct     (GPU 2)
 #   • Qwen3-VL requires transformers ≥ 4.52 with Qwen3VLForConditionalGeneration.
-#     If unavailable, the fallback chain below will warn and use Qwen2_5_VL.
 #   • Verify the exact hub ID at https://huggingface.co/Qwen before running.
 if _needs_verifier:
-    if MODEL_VARIANT == "qwen3":
-        _verifier_model_id = "Qwen/Qwen3-VL-7B-Instruct"
-        print(f"3. Loading Qwen3-VL-7B for Verifier (variant=qwen3)...")
-    else:
-        _verifier_model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
-        print(f"3. Loading Qwen2.5-VL-7B for Verifier (variant=qwen25)...")
+    _verifier_model_id = "Qwen/Qwen3-VL-8B-Instruct"
+    print(f"3. Loading Qwen3-VL-8B for Verifier...")
 
     verifier_processor = AutoProcessor.from_pretrained(
         _verifier_model_id,
@@ -535,19 +512,18 @@ if _needs_verifier:
         max_pixels=1280 * 28 * 28,
     )
 
-    # Model class resolution: prefer the newest available class for each variant.
+    # Model class resolution: prefer Qwen3VLForConditionalGeneration.
     # Fallback chain ensures backward compatibility with older transformers installs.
     VerifierModelClass = None
-    if MODEL_VARIANT == "qwen3":
-        try:
-            from transformers import Qwen3VLForConditionalGeneration
-            VerifierModelClass = Qwen3VLForConditionalGeneration
-        except ImportError:
-            print(
-                "WARNING: Qwen3VLForConditionalGeneration not found — "
-                "falling back to Qwen2_5_VLForConditionalGeneration. "
-                "Upgrade transformers: pip install --upgrade transformers"
-            )
+    try:
+        from transformers import Qwen3VLForConditionalGeneration
+        VerifierModelClass = Qwen3VLForConditionalGeneration
+    except ImportError:
+        print(
+            "WARNING: Qwen3VLForConditionalGeneration not found — "
+            "falling back to Qwen2_5_VLForConditionalGeneration. "
+            "Upgrade transformers: pip install --upgrade transformers"
+        )
 
     if VerifierModelClass is None:
         try:

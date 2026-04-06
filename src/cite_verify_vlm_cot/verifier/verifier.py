@@ -171,7 +171,7 @@ def parse_hallucination_details(full_output: str) -> List[Dict[str, str]]:
 
 def prepare_images_for_verifier(state):
     """
-    Prepare question image sources and descriptions for Qwen2.5-VL.
+    Prepare question image sources and descriptions for Qwen3-VL.
     ROI retrieval has been removed; only question images (from state.image_paths)
     are passed to the verifier, matching the solver's [Question Image N] citation format.
 
@@ -182,7 +182,7 @@ def prepare_images_for_verifier(state):
     descriptions = []
 
     MAX_IMAGES = 4  # keep low for consistent processor token counts
-    # Question images: use file:// path (Qwen2.5-VL supports local files)
+    # Question images: use file:// path (Qwen3-VL supports local files)
     
     # Question images (from paths)
     for idx, img_path in enumerate(state.image_paths or []):
@@ -274,10 +274,10 @@ def verifier_step(state: State, model, processor) -> State:
         verifier_span.set_attribute("verifier.retry_attempt", state.retry_count)
         verifier_span.set_attribute("verifier.num_images", len(image_sources))
 
-        with tracer.start_as_current_span("Qwen2-VL-Verifier", openinference_span_kind="llm") as vlm_span:
-            vlm_span.set_attribute("vlm.model_name", "Qwen-2.5-VL-7B")
+        with tracer.start_as_current_span("Qwen3-VL-Verifier", openinference_span_kind="llm") as vlm_span:
+            vlm_span.set_attribute("vlm.model_name", "Qwen3-VL-8B")
 
-            # Official Qwen2.5-VL flow (https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct):
+            # Official Qwen3-VL flow (https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct):
             # 1) Messages with image sources in content; 2) apply_chat_template; 
             # 3) process_vision_info(messages); 
             # 4) processor(text=..., images=image_inputs, videos=video_inputs)
@@ -300,13 +300,13 @@ def verifier_step(state: State, model, processor) -> State:
 
             if process_vision_info is None:
                 raise ImportError(
-                    "qwen_vl_utils is required for Qwen2.5-VL verifier. Install with: pip install qwen-vl-utils"
+                    "qwen_vl_utils is required for Qwen3-VL verifier. Install with: pip install qwen-vl-utils"
                 )
             image_inputs, video_inputs = process_vision_info(messages)
 
-            # Process inputs - Qwen2-VL specific format
+            # Process inputs - Qwen3-VL specific format
             inputs = processor(
-                text=[text],  # text as list for Qwen2-VL
+                text=[text],  # text as list for Qwen3-VL
                 images=image_inputs,
                 videos=video_inputs,
                 padding=True,
@@ -363,7 +363,7 @@ def verifier_step(state: State, model, processor) -> State:
 
         # Parse the response and update state.
         # Use IGNORECASE throughout and handle markdown bold (**VERIFIED**) that
-        # Qwen2.5-VL sometimes emits.
+        # Qwen3-VL sometimes emits.
         final_verdict = re.search(
             r"Final\s+Verdict:\s*\*{0,2}\[?(VERIFIED|REJECTED)\]?\*{0,2}",
             full_output, re.IGNORECASE

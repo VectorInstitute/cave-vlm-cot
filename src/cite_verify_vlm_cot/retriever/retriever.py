@@ -42,7 +42,7 @@ import functools
 # Load cross-encoder — force onto GPU if available so batch scoring runs
 # ~10× faster than CPU (A100 latency: ~50ms vs ~500ms for 15-pair batches).
 # Pin cross-encoder to cuda:0 explicitly.
-# cuda:0 hosts the small Qwen2.5-7B-4bit planner (~4GB) and leaves >70GB free,
+# cuda:0 hosts the small Qwen3-8B-4bit planner (~5GB) and leaves >70GB free,
 # so co-locating the <0.5GB cross-encoder there wastes nothing while giving
 # ~10× speedup vs CPU.  Using bare "cuda" (without an index) defaults to
 # cuda:0 only when CUDA_VISIBLE_DEVICES is set correctly; being explicit
