@@ -122,7 +122,8 @@ def build_text_index(csv_path: str = "/fs02/home/sneharao/cave-vlm-cot/src/cite_
     from retriever.retriever import text_to_embedding
 
     df = pd.read_csv(csv_path)
-    # df = df.iloc[:5000]
+    df = df.iloc[:10]
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     
     data = pd.DataFrame()
 

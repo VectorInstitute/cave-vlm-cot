@@ -36,7 +36,7 @@
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
 #SBATCH --gres=gpu:rtx6000:4          # 4 GPUs per task (planner/solver/verifier + spare)
 #SBATCH --mem=120G
-#SBATCH --time=7-00:00:00             # 3 days — comfortably covers 1 shard
+#SBATCH --time=7-00:00:00             # 7 days — comfortably covers 1 shard
 #SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
 #SBATCH --output=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_%j_%a.out
 #SBATCH --error=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_%j_%a.err

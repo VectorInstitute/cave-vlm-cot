@@ -120,7 +120,7 @@ from verifier.verifier import (
 
 # Load your data
 df = pd.read_csv(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
-# df = df.iloc[:5000]
+df = df.iloc[:10]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 # Shard the dataframe.
