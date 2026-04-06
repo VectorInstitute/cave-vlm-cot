@@ -47,9 +47,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from solver.solver_evals import WEIGHT_CONFIGS, run_weight_sensitivity_analysis
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # I/O helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_results_json(path: str):
     with open(path) as f:
@@ -89,9 +87,7 @@ def _synthetic_samples(n: int = 200, seed: int = 42):
     return samples
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Formatting
-# ─────────────────────────────────────────────────────────────────────────────
 
 _COL_WIDTHS = {
     "config":           22,
@@ -164,9 +160,7 @@ def print_table(analysis: dict):
     print()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Saving
-# ─────────────────────────────────────────────────────────────────────────────
 
 def save_results(analysis: dict, out_dir: str = "outputs"):
     os.makedirs(out_dir, exist_ok=True)
@@ -208,21 +202,16 @@ def save_results(analysis: dict, out_dir: str = "outputs"):
     print(f"Saved CSV  → {csv_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Add a custom weight configuration at runtime
-# ─────────────────────────────────────────────────────────────────────────────
 
 def add_custom_config(name: str, acc: float, cprec: float, crec: float,
                       ais: float, gnd: float) -> None:
     """
     Register a one-off weight configuration at runtime.
-
     Example::
-
         python sensitivity_analysis.py \\
             --smoke-test \\
             --custom-config my_config 0.5 0.15 0.15 0.1 0.1
-
     Weights must sum to 1.0 (checked by run_weight_sensitivity_analysis).
     """
     WEIGHT_CONFIGS[name] = {
@@ -235,9 +224,7 @@ def add_custom_config(name: str, acc: float, cprec: float, crec: float,
     print(f"Registered custom config '{name}': {WEIGHT_CONFIGS[name]}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(

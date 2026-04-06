@@ -34,7 +34,7 @@
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
-#SBATCH --gres=gpu:rtx6000:4          # 4 GPUs per task (planner/solver/verifier + spare)
+#SBATCH --gres=gpu:a100:3          # 4 GPUs per task (planner/solver/verifier + spare)
 #SBATCH --mem=120G
 #SBATCH --time=7-00:00:00             # 7 days — comfortably covers 1 shard
 #SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
@@ -100,12 +100,12 @@ export PYTHONPATH=/cvmfs/.../site-packages:$PYTHONPATH   # ← path from above c
 source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
 
 # Huggingface / PyTorch environment
-export HF_HOME=/fs02/home/sneharao/hf_cache       
+export HF_HOME=/fs02/home/sneharao/hf_cache   
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export TQDM_DISABLE=1
 export TRANSFORMERS_CACHE=/fs02/home/sneharao/hf_cache
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # API keys
 # set -a / source correctly handles values with special characters
@@ -158,7 +158,7 @@ print(f"\nGPUs available: {torch.cuda.device_count()}")
 for i in range(torch.cuda.device_count()):
     props = torch.cuda.get_device_properties(i)
     free, total = torch.cuda.mem_get_info(i)
-        print(f"  cuda:{i}  {props.name}  {total/1e9:.0f} GB total  {free/1e9:.1f} GB free")
+    print(f"  cuda:{i}  {props.name}  {total/1e9:.0f} GB total  {free/1e9:.1f} GB free")
 PYEOF
 
 # Keep only the 2 most recent log sets per experiment label
@@ -179,6 +179,7 @@ python -u experiments.py          \
     --num-shards    "${NUM_SHARDS}"      \
     --shard         "${SHARD_ID}"        \
     --pipeline      "${PIPELINE}"        \
+    --no-traces                          \
     2>"${LOGDIR}/cave_${SLURM_JOB_ID}_${SHARD_ID}.err" \
     | grep -Ev "it/s|B/s|%\||\[.*\].*ETA|Downloading|Loading" \
     > "${LOGDIR}/cave_${SLURM_JOB_ID}_${SHARD_ID}.out"

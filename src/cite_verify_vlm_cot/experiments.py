@@ -30,7 +30,7 @@ import traceback
 from opentelemetry import trace as otel_trace
 
 # Set environment variables before any model/library imports
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 HOME_DIR = os.path.expanduser("~")
 # Shard configuration
 # Reads from CLI args, falling back to SLURM_ARRAY_TASK_ID when running as
@@ -64,16 +64,28 @@ _parser.add_argument(
         "  no-citation-injector   — Ablation 3: full pipeline minus inject_citations"
     ),
 )
+_parser.add_argument(
+    "--no-traces",
+    action="store_true",
+    default=False,
+    help=(
+        "Disable OpenTelemetry trace export to Phoenix. Experiment results\n"
+        "(datasets, evaluators) are still saved — only per-span trace data\n"
+        "is suppressed. Saves significant storage on large runs."
+    ),
+)
 
 _args, _ = _parser.parse_known_args()
-# SLURM_ARRAY_TASK_ID takes precedence when --shard is not supplied explicitly
+# When --shard is passed explicitly (by cave_array.sh), use it directly.
+# Only fall back to SLURM_ARRAY_TASK_ID for legacy single-experiment runs.
 _slurm_task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", -1))
 SHARD_INDEX = _args.shard if _args.shard is not None else (
     _slurm_task_id if _slurm_task_id >= 0 else 0
 )
-NUM_SHARDS = _args.num_shards if _slurm_task_id < 0 else max(_args.num_shards, _slurm_task_id + 1)
+NUM_SHARDS = _args.num_shards
 PIPELINE_MODE  = _args.pipeline        # "full" | "retrieval-solver" | "solver-only" | "no-citation-injector"
 MODEL_VARIANT  = "qwen3"              # Qwen3 is now the only supported model family
+NO_TRACES      = _args.no_traces       # suppress span export to save Phoenix storage
 
 # Validate
 if not (0 <= SHARD_INDEX < NUM_SHARDS):
@@ -81,6 +93,7 @@ if not (0 <= SHARD_INDEX < NUM_SHARDS):
 print(f"[Shard]    Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
 print(f"[Pipeline] {PIPELINE_MODE}")
 print(f"[Models]   extractor/verifier variant: {MODEL_VARIANT}")
+print(f"[Traces]   {'DISABLED (--no-traces)' if NO_TRACES else 'enabled'}")
 
 CACHE_DIR = os.path.join(HOME_DIR, "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -120,7 +133,7 @@ from verifier.verifier import (
 
 # Load your data
 df = pd.read_csv(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
-df = df.iloc[:10]
+# df = df.iloc[:10]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 # Shard the dataframe.
@@ -792,6 +805,17 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
         return {**_DEFAULT_OUTPUT, "pid": pid}
 
 print("Task function defined: cave_vlm_cot_with_verifier_task")
+
+# Wrap task in suppress_tracing if --no-traces is set.
+# This stops span export to Phoenix (saving storage) while experiment
+# results (datasets, evaluator scores) are still recorded via the Client API.
+if NO_TRACES:
+    from phoenix.trace import suppress_tracing
+    _unwrapped_task = cave_vlm_cot_with_verifier_task
+    def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
+        with suppress_tracing():
+            return _unwrapped_task(input, expected)
+    print("[Traces]   Task wrapped with suppress_tracing — no spans will be exported")
 
 # Run experiment
 print("\nRunning experiment...")
