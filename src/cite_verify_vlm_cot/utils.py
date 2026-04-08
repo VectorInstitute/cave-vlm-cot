@@ -113,13 +113,19 @@ def safe_parse_json(x, default=None):
         except (ValueError, SyntaxError):
             return default if default is not None else {}
 
-def build_text_index(csv_path: str = "/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"):
+def build_text_index(csv_path: str = None):
     """
     Build the text FAISS index from the ScienceQA KB.
     Question images are passed directly to the solver at inference time
     and are not indexed here.
     """
     from retriever.retriever import text_to_embedding
+
+    if csv_path is None:
+        csv_path = os.path.join(
+            os.path.expanduser("~"),
+            "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"
+        )
 
     df = pd.read_csv(csv_path)
     df = df.iloc[:10]
@@ -154,7 +160,8 @@ def build_text_index(csv_path: str = "/fs02/home/sneharao/cave-vlm-cot/src/cite_
         torch.cuda.empty_cache()
         gc.collect()
 
-    _out_dir = os.path.expanduser("~/outputs")
+    _project_dir = os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot")
+    _out_dir = os.path.join(_project_dir, "indexes")
     os.makedirs(_out_dir, exist_ok=True)
 
     # Save the embeddings DataFrame so experiments.py can load it as `data`.

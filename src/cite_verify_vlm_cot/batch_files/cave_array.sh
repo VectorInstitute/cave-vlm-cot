@@ -30,16 +30,16 @@
 #   tail -f logs/cave_<jobid>_<taskid>.out
 
 #SBATCH --job-name=cave-vlm-cot
-#SBATCH --array=0-19                  # 20 tasks: 4 experiments × 5 shards
+#SBATCH --array=0-4                  # 20 tasks: 4 experiments × 5 shards
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
-#SBATCH --gres=gpu:a100:3          # 4 GPUs per task (planner/solver/verifier + spare)
+#SBATCH --gres=gpu:a100:3          # 3 GPUs per task (planner/solver/verifier)
 #SBATCH --mem=120G
 #SBATCH --time=7-00:00:00             # 7 days — comfortably covers 1 shard
 #SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
-#SBATCH --output=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_%j_%a.out
-#SBATCH --error=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs/cave_%j_%a.err
+#SBATCH --output=/projects/cave-vlm-cot/logs/cave_%j_%a.out
+#SBATCH --error=/projects/cave-vlm-cot/logs/cave_%j_%a.err
 
 set -euo pipefail
 cleanup() {
@@ -48,13 +48,16 @@ cleanup() {
     gzip -f "${LOGDIR}/cave_${SLURM_JOB_ID}_${SHARD_ID}.err" 2>/dev/null || true
 }
 trap cleanup EXIT
-mkdir -p /fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot/logs
+mkdir -p /projects/cave-vlm-cot/logs
+
+# Paths — source code lives on home, large files on project storage
+PROJECT_DIR=/projects/cave-vlm-cot
 
 # Paths
 WORKDIR=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
-LOGDIR=${WORKDIR}/logs
-OUTDIR=${WORKDIR}/outputs
-mkdir -p "${LOGDIR}" "${OUTDIR}"
+LOGDIR=${PROJECT_DIR}/logs
+OUTDIR=${PROJECT_DIR}/outputs
+mkdir -p "${LOGDIR}" "${OUTDIR}" "${PROJECT_DIR}/hf_cache" "${PROJECT_DIR}/indexes"
 
 # Derive experiment config and shard from flat task ID
 #   SLURM_ARRAY_TASK_ID: 0–19 (flat)
@@ -99,12 +102,13 @@ export PYTHONPATH=/cvmfs/.../site-packages:$PYTHONPATH   # ← path from above c
 
 source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
 
-# Huggingface / PyTorch environment
-export HF_HOME=/fs02/home/sneharao/hf_cache   
-export HF_DATASETS_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+# Huggingface / PyTorch environment — all caches on project storage
+export CAVE_PROJECT_DIR=/projects/cave-vlm-cot
+export HF_HOME=${CAVE_PROJECT_DIR}/hf_cache
+export TRANSFORMERS_CACHE=${CAVE_PROJECT_DIR}/hf_cache
+# export HF_DATASETS_OFFLINE=1
+# export TRANSFORMERS_OFFLINE=1
 export TQDM_DISABLE=1
-export TRANSFORMERS_CACHE=/fs02/home/sneharao/hf_cache
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # API keys

@@ -20,7 +20,7 @@ model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-capt
 # Constants
 TARGET_SIZE = (224, 224)
 OUTPUT_ROOT = "processed_images"
-DATASET_ROOT = "/h/sneharao/scienceqa"   # adjust if needed
+DATASET_ROOT = os.environ.get("SCIENCEQA_ROOT", "/projects/cave-vlm-cot/scienceqa")
 
 def collect_images(split, pid, primary_image_name=None):
     """
@@ -28,7 +28,7 @@ def collect_images(split, pid, primary_image_name=None):
     - image.png
     - choice_0.png, choice_1.png, ...
     """
-    pid_dir = os.path.join('/h/sneharao/scienceqa/', split, str(pid))
+    pid_dir = os.path.join(DATASET_ROOT, split, str(pid))
     if not os.path.isdir(pid_dir):
         return []
 
@@ -84,7 +84,7 @@ def run_ocr(image_path):
     return ""
 
 # Load problem annotations
-data = json.load(open("/h/sneharao/scienceqa/problems.json"))
+data = json.load(open(os.path.join(DATASET_ROOT, "problems.json")))
 
 examples = []
 

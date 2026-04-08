@@ -16,6 +16,31 @@
 | **high**      | 2000     | Higher priority than normal                                                                            |
 | **benchmark** | 2000     | **BUT limited**: Max 1 GPU per job, Max walltime **1 day** (1-00:00:00), and cluster-level constraints |
 
+# List recent logs
+ls -lt /projects/cave-vlm-cot/logs/ | head -20
+rm -rf /projects/cave-vlm-cot/logs/
+squeue -u sneharao -o "%i %P %N %t %L"
+sbatch --array=0-4 --gres=gpu:a40:3 -p a40_b5 --exclude=bn063,bn065,bn067,bn068 cave_array.sh
+sinfo -p a100_b3,a100_b4,a100_b5 -o "%P %l %20N %10t"
+
+# Tail a running job
+tail -f /projects/cave-vlm-cot/logs/cave_<JOBID>_<TASKID>.out
+
+# Check progress across all shards
+for f in /projects/cave-vlm-cot/logs/cave_*.err; do
+  echo "=== $(basename $f) ==="
+  tail -1 "$f"
+done
+
+# View without extracting
+zcat /projects/cave-vlm-cot/logs/cave_38533_4.out.gz | less
+
+# Or just the last 50 lines
+zcat /projects/cave-vlm-cot/logs/cave_38533_4.out.gz | tail -50
+
+# Search inside it
+zgrep "running tasks" /projects/cave-vlm-cot/logs/cave_38533_4.out.gz | tail -5
+
 du -sh ~/.local/lib/python*/site-packages | sort -h (unused python packages)
 rm -rf ~/.cache/pip
 rm -rf ~/.cache/huggingface

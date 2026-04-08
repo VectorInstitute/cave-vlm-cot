@@ -32,6 +32,15 @@ from opentelemetry import trace as otel_trace
 # Set environment variables before any model/library imports
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 HOME_DIR = os.path.expanduser("~")
+
+# Project storage — 250 GB, used for model caches, logs, outputs, and indexes.
+# Falls back to home directory if the project path doesn't exist.
+PROJECT_DIR = os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot")
+if not os.path.isdir(PROJECT_DIR):
+    print(f"[Storage] Project dir {PROJECT_DIR} not found, falling back to ~/cave-vlm-cot")
+    PROJECT_DIR = os.path.join(HOME_DIR, "cave-vlm-cot")
+WORKDIR = os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot")
+
 # Shard configuration
 # Reads from CLI args, falling back to SLURM_ARRAY_TASK_ID when running as
 # a job array.  A single-node run (no args) behaves identically to before.
@@ -95,7 +104,7 @@ print(f"[Pipeline] {PIPELINE_MODE}")
 print(f"[Models]   extractor/verifier variant: {MODEL_VARIANT}")
 print(f"[Traces]   {'DISABLED (--no-traces)' if NO_TRACES else 'enabled'}")
 
-CACHE_DIR = os.path.join(HOME_DIR, "hf_cache")
+CACHE_DIR = CACHE_DIR = os.path.join(PROJECT_DIR, "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
@@ -132,7 +141,7 @@ from verifier.verifier import (
 )
 
 # Load your data
-df = pd.read_csv(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
+df = pd.read_csv(os.path.join(WORKDIR, "outputs/scienceqa_augmented.csv"))
 # df = df.iloc[:10]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
@@ -194,7 +203,10 @@ experiment_df = pd.DataFrame(experiment_data)
 
 # Upload (or reuse) dataset in Phoenix
 # Initialize the experiments client
-experiments_client = Client()
+experiments_client = Client(
+    base_url="https://app.phoenix.arize.com/s/CaVe-VLM-CoT",
+    headers={"api_key": os.environ["PHOENIX_API_KEY"]},
+)
 
 # Upload dataset to Phoenix
 try:
@@ -207,6 +219,7 @@ try:
             "subject", "topic", "category", "skill",
         ],
         output_keys=["gold_answer"],
+        timeout=300,
     )
     print(f"Created dataset: {cave_dataset.name}  ({len(experiment_df)} examples)")
 except Exception as e:
@@ -431,10 +444,10 @@ gc.collect()
 # the index was last built.  Without the size check, adding more rows to the
 # CSV would silently use a stale index that covers fewer documents.
 def _index_needs_rebuild(expected_rows: int) -> bool:
-    if not os.path.exists(os.path.expanduser("~/outputs/text_index.faiss")):
+    if not os.path.exists(os.path.join(PROJECT_DIR, "indexes/text_index.faiss")):
         return True
     try:
-        idx = faiss.read_index(os.path.expanduser("~/outputs/text_index.faiss"))
+        idx = faiss.read_index(os.path.join(PROJECT_DIR, "indexes/text_index.faiss"))
         if idx.ntotal < expected_rows:
             print(f"Index has {idx.ntotal} vectors but dataset has {expected_rows} "
                   f"text rows — rebuilding.")
@@ -447,13 +460,13 @@ num_text_rows = len(df)  # rough lower bound; actual text rows = 1 per CSV row
 if _index_needs_rebuild(num_text_rows):
     from utils import build_text_index
     print("Building indexes (first run or stale index)...")
-    build_text_index(os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"))
+    build_text_index(os.path.join(WORKDIR, "outputs/scienceqa_augmented.csv"))
     print("Indexes built!")
 
 # Load pre-built search indexes for fast retrieval
 print("Loading indexes...")
-text_index = faiss.read_index(os.path.expanduser("~/outputs/text_index.faiss"))
-data = pd.read_csv(os.path.expanduser("~/outputs/multimodal_embeddings.csv"))
+text_index = faiss.read_index(os.path.join(PROJECT_DIR, "indexes/text_index.faiss"))
+data = pd.read_csv(os.path.join(PROJECT_DIR, "indexes/multimodal_embeddings.csv"))
 
 # Model loading — conditional on pipeline mode and model variant
 #  PIPELINE           planner    solver    verifier
@@ -494,10 +507,12 @@ else:
 # 2. Solver — Llama-3.2V-11B — pinned to GPU1 (~22GB bfloat16, leaves 58GB headroom)
 print("2. Loading Llama-3.2V-11B for Solver...")
 solver_model_id = "zhangsongbo365/Llama-3.2V-11B-cot-nf4"
+# Pin solver to GPU1 when other models use GPU0, otherwise GPU0
+_solver_gpu = "cuda:0" if PIPELINE_MODE == "solver-only" else "cuda:1"
 solver_model = MllamaForConditionalGeneration.from_pretrained(
     solver_model_id,
     use_safetensors=True,
-    device_map={"": "cuda:1"}, # pin to GPU1
+    device_map={"": _solver_gpu},
     torch_dtype=torch.bfloat16,
     trust_remote_code=True,
     cache_dir=CACHE_DIR,
@@ -657,7 +672,7 @@ _DEFAULT_OUTPUT = {
     "confidence_appropriate": 0.0,
     "feedback_quality": 0.0,
 }
-DEBUG_LOG_PATH = os.path.join(HOME_DIR, "logs/experiments_debug.log")
+DEBUG_LOG_PATH = os.path.join(PROJECT_DIR, "logs/experiments_debug.log")
 
 
 def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
@@ -810,7 +825,19 @@ print("Task function defined: cave_vlm_cot_with_verifier_task")
 # This stops span export to Phoenix (saving storage) while experiment
 # results (datasets, evaluator scores) are still recorded via the Client API.
 if NO_TRACES:
-    from phoenix.trace import suppress_tracing
+    try:
+        from phoenix.trace import suppress_tracing
+    except ImportError:
+        from contextlib import contextmanager
+        @contextmanager
+        def suppress_tracing():
+            """Fallback: disable tracing via OpenTelemetry context."""
+            from opentelemetry.context import attach, detach, set_value
+            token = attach(set_value("suppress_instrumentation", True))
+            try:
+                yield
+            finally:
+                detach(token)
     _unwrapped_task = cave_vlm_cot_with_verifier_task
     def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
         with suppress_tracing():

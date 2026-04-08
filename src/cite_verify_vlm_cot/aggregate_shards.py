@@ -109,9 +109,7 @@ def col_to_name(col):
 # Compute and print aggregate metrics
 WIDTH = 47
 
-print("=" * (WIDTH + 20))
 print(f" CaVe-VLM-CoT  Aggregated ({len(dfs)} shard(s), n={len(combined)})")
-print("=" * (WIDTH + 20))
 
 # Primary metrics in a meaningful display order, then anything else
 PRIMARY = [
