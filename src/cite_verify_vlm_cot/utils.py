@@ -17,12 +17,6 @@ import pandas as pd
 import torch
 from pydantic import BaseModel
 
-# Constants
-DEFAULT_CSV_PATH = "scienceqa_augmented.csv"
-MAX_ROWS = 5000
-TEXT_INDEX_PATH = "text_index.faiss"
-EMBEDDINGS_CSV_PATH = "multimodal_embeddings.csv"
-
 # Ordered list of text fields used to build a document's text representation.
 TEXT_FIELD_ORDER = ["subject", "topic", "category", "skill", "lecture", "hint", "solution"]
 
@@ -113,13 +107,17 @@ def safe_parse_json(x, default=None):
         except (ValueError, SyntaxError):
             return default if default is not None else {}
 
-def build_text_index(csv_path: str = None):
+def build_text_index(csv_path: str = None, index_dir: str = None):
     """
     Build the text FAISS index from the ScienceQA KB.
     Question images are passed directly to the solver at inference time
     and are not indexed here.
     """
     from retriever.retriever import text_to_embedding
+
+    _project_dir = os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot")
+    _out_dir = index_dir or os.path.join(_project_dir, "indexes")  # ← use passed dir
+    os.makedirs(_out_dir, exist_ok=True)
 
     if csv_path is None:
         csv_path = os.path.join(
@@ -128,7 +126,7 @@ def build_text_index(csv_path: str = None):
         )
 
     df = pd.read_csv(csv_path)
-    df = df.iloc[:10]
+    # df = df.iloc[:10]
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     
     data = pd.DataFrame()
@@ -159,10 +157,6 @@ def build_text_index(csv_path: str = None):
 
         torch.cuda.empty_cache()
         gc.collect()
-
-    _project_dir = os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot")
-    _out_dir = os.path.join(_project_dir, "indexes")
-    os.makedirs(_out_dir, exist_ok=True)
 
     # Save the embeddings DataFrame so experiments.py can load it as `data`.
     # Without this, experiments.py crashes with FileNotFoundError on every run

@@ -83,6 +83,13 @@ _parser.add_argument(
         "is suppressed. Saves significant storage on large runs."
     ),
 )
+_parser.add_argument(
+    "--dataset",
+    type=str,
+    default="scienceqa",
+    choices=["scienceqa", "mmmu"],
+    help="Dataset to evaluate on (default: scienceqa)",
+)
 
 _args, _ = _parser.parse_known_args()
 # When --shard is passed explicitly (by cave_array.sh), use it directly.
@@ -95,6 +102,7 @@ NUM_SHARDS = _args.num_shards
 PIPELINE_MODE  = _args.pipeline        # "full" | "retrieval-solver" | "solver-only" | "no-citation-injector"
 MODEL_VARIANT  = "qwen3"              # Qwen3 is now the only supported model family
 NO_TRACES      = _args.no_traces       # suppress span export to save Phoenix storage
+DATASET_NAME = _args.dataset
 
 # Validate
 if not (0 <= SHARD_INDEX < NUM_SHARDS):
@@ -141,7 +149,14 @@ from verifier.verifier import (
 )
 
 # Load your data
-df = pd.read_csv(os.path.join(WORKDIR, "outputs/scienceqa_augmented.csv"))
+# CSVs live on project storage (/projects/cave-vlm-cot/outputs/) — the same
+# location both data-preparation scripts write to via $CAVE_PROJECT_DIR.
+# WORKDIR (home dir) holds source code only, not large data files.
+_CSV_MAP = {
+    "scienceqa": os.path.join(PROJECT_DIR, "outputs/scienceqa_augmented.csv"),
+    "mmmu":      os.path.join(PROJECT_DIR, "outputs/mmmu_augmented.csv"),
+}
+df = pd.read_csv(_CSV_MAP[DATASET_NAME])
 # df = df.iloc[:10]
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
@@ -196,6 +211,7 @@ for idx, row in df.iterrows():
             "topic": safe_str(row.get("topic")),
             "skill": safe_str(row.get("skill")),
             "category": safe_str(row.get("category")),
+            "dataset": DATASET_NAME,   # add this line for traceability in Phoenix
         }
     )
 
@@ -211,12 +227,12 @@ experiments_client = Client(
 # Upload dataset to Phoenix
 try:
     cave_dataset = experiments_client.datasets.create_dataset(
-        name=f"scienceqa-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
+        name=f"{DATASET_NAME}-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
         dataframe=experiment_df,
         input_keys=[
             "pid", "question", "hint", "choices", "lecture", "answer", 
             "image_paths", "img_captions", "img_ocr",
-            "subject", "topic", "category", "skill",
+            "subject", "topic", "category", "skill", "dataset",
         ],
         output_keys=["gold_answer"],
         timeout=300,
@@ -225,7 +241,7 @@ try:
 except Exception as e:
     print(f"Dataset creation note: {e}")
     cave_dataset = experiments_client.datasets.get_dataset(
-        dataset=f"scienceqa-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
+        dataset=f"{DATASET_NAME}-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
         timeout=10000
     )
     print(f"Using existing dataset: {cave_dataset.name}")
@@ -440,14 +456,18 @@ print(f"Defined {len(ALL_EVALUATORS)} evaluators")
 torch.cuda.empty_cache()
 gc.collect()
 
+_index_dir = os.path.join(PROJECT_DIR, "indexes", DATASET_NAME)
+os.makedirs(_index_dir, exist_ok=True)
+
 # Build indexes if they don't exist yet OR if the dataset has grown since
 # the index was last built.  Without the size check, adding more rows to the
 # CSV would silently use a stale index that covers fewer documents.
 def _index_needs_rebuild(expected_rows: int) -> bool:
-    if not os.path.exists(os.path.join(PROJECT_DIR, "indexes/text_index.faiss")):
+    index_path = os.path.join(_index_dir, "text_index.faiss") 
+    if not os.path.exists(index_path):
         return True
     try:
-        idx = faiss.read_index(os.path.join(PROJECT_DIR, "indexes/text_index.faiss"))
+        idx = faiss.read_index(index_path)                    
         if idx.ntotal < expected_rows:
             print(f"Index has {idx.ntotal} vectors but dataset has {expected_rows} "
                   f"text rows — rebuilding.")
@@ -460,13 +480,13 @@ num_text_rows = len(df)  # rough lower bound; actual text rows = 1 per CSV row
 if _index_needs_rebuild(num_text_rows):
     from utils import build_text_index
     print("Building indexes (first run or stale index)...")
-    build_text_index(os.path.join(WORKDIR, "outputs/scienceqa_augmented.csv"))
+    build_text_index(_CSV_MAP[DATASET_NAME], index_dir=_index_dir)
     print("Indexes built!")
 
 # Load pre-built search indexes for fast retrieval
 print("Loading indexes...")
-text_index = faiss.read_index(os.path.join(PROJECT_DIR, "indexes/text_index.faiss"))
-data = pd.read_csv(os.path.join(PROJECT_DIR, "indexes/multimodal_embeddings.csv"))
+text_index = faiss.read_index(os.path.join(_index_dir, "text_index.faiss"))
+data = pd.read_csv(os.path.join(_index_dir, "multimodal_embeddings.csv"))
 
 # Model loading — conditional on pipeline mode and model variant
 #  PIPELINE           planner    solver    verifier
@@ -865,7 +885,7 @@ experiment_with_verifier = experiments_client.experiments.run_experiment(
     task=cave_vlm_cot_with_verifier_task,
     evaluators=ALL_EVALUATORS,
     experiment_name=(
-        f"CaVe-VLM-CoT-{PIPELINE_MODE}-{MODEL_VARIANT}"
+        f"CaVe-VLM-CoT-{DATASET_NAME}-{PIPELINE_MODE}-{MODEL_VARIANT}"
         f"-shard{SHARD_INDEX}-of-{NUM_SHARDS}"
     ),
     experiment_description=(

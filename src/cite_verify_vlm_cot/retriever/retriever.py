@@ -340,14 +340,34 @@ def retriever_step(state, text_index, data, k=3, use_hybrid=True, use_cross_enco
         retrieved = {}
         retrieval_k = k
 
-        # Natural science questions span physics, chemistry, biology, earth science
-        # and more — the ScienceQA lecture corpus has thin coverage of the long tail.
-        # Doubling the web search budget increases hit rate for these questions without
-        # adding extra local-corpus calls (which are already retrieval_k * 2).
-        is_natural_science = getattr(state, 'subject', '').lower() == 'natural science'
-        web_k = retrieval_k * 2 if is_natural_science else retrieval_k
-        if is_natural_science:
-            print(f"  [Retriever] Natural science question — web_k={web_k} (doubled)")
+        # Widen the web search budget for questions where the local KB is sparse
+        # or the subject is a science domain likely to have thin KB coverage.
+        #
+        # ScienceQA:  subject == "natural science" fires the old heuristic.
+        # MMMU:       subject is e.g. "Physics", "Biology", "Chemistry" — these
+        #             never matched "natural science", so MMMU science questions
+        #             never got the doubled budget even though they need it more
+        #             (MMMU has no lecture/hint KB at all).
+        #
+        # New rule — double web_k when EITHER:
+        #   (a) subject is a recognised science domain (covers both datasets), OR
+        #   (b) the KB fields are all empty (catches any future dataset with no KB)
+        _SCIENCE_SUBJECTS = {
+            "natural science",           # ScienceQA label
+            "physics", "biology", "chemistry",
+            "basic_medical_science", "clinical_medicine",
+            "diagnostics_and_laboratory_medicine", "pharmacy",
+            "energy_and_power", "electronics", "materials",
+            "mechanical_engineering", "architecture_and_engineering",
+        }
+        _subject = getattr(state, 'subject', '').lower()
+        _has_sparse_kb = not bool(
+            getattr(state, 'lecture', '') or getattr(state, 'hint', '')
+        )
+        is_science_or_sparse = _subject in _SCIENCE_SUBJECTS or _has_sparse_kb
+        web_k = retrieval_k * 2 if is_science_or_sparse else retrieval_k
+        if is_science_or_sparse:
+            print(f"  [Retriever] Science/sparse-KB question (subject='{_subject}') — web_k={web_k} (doubled)")
 
         # Per-subquery retrieval with query expansion
         # For each planner subquery, generate up to 2 rule-based paraphrases

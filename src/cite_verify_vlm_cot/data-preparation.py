@@ -173,5 +173,7 @@ for idx, row in tqdm(df.iterrows(), total=len(df)):
     df.at[idx, "img_captions"] = json.dumps(captions)
     df.at[idx, "img_ocr"] = json.dumps(ocr_outputs)
 
-df.to_csv("scienceqa_augmented.csv", index=False)
-df.to_json("scienceqa_augmented.json", orient="records", indent=2)
+_output_dir = os.path.join(os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot"), "outputs")
+os.makedirs(_output_dir, exist_ok=True)
+df.to_csv(os.path.join(_output_dir, "scienceqa_augmented.csv"), index=False)
+df.to_json(os.path.join(_output_dir, "scienceqa_augmented.json"), orient="records", indent=2)
