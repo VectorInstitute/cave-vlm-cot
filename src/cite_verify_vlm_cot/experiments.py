@@ -184,7 +184,18 @@ for idx, row in df.iterrows():
     answer = int(row["answer"]) if pd.notna(row.get("answer")) else 0
 
     # Get gold answer
-    gold_answer = choices[answer] if 0 <= answer < len(choices) else ""
+    def parse_choices(x):
+        if isinstance(x, float):  # NaN
+            return []
+        if isinstance(x, list):
+            return x
+        try:
+            return ast.literal_eval(x)
+        except Exception:
+            return []
+
+    choices = parse_choices(choices)
+    gold_answer = choices[answer] if choices and 0 <= int(answer) < len(choices) else ""
 
     # Parse image_paths
     image_paths = safe_parse_json(row.get("image_paths"), default=[])
@@ -509,7 +520,8 @@ print("\nLoading models for the pipeline...")
 #     do_sample=False and ensure the tokenizer chat template does NOT inject
 #     <think> tokens (pass enable_thinking=False if the template supports it).
 if _needs_planner:
-    _planner_model_id = "unsloth/Qwen3-8B-bnb-4bit"
+    # _planner_model_id = "unsloth/Qwen3-8B-bnb-4bit"
+    _planner_model_id = "/projects/cave-vlm-cot/hf_cache/hub/models--unsloth--Qwen3-8B-bnb-4bit/snapshots/1deaf68f694c40dbce295da300851729d759b21a"
     print(f"1. Loading Qwen3-8B for Planner...")
 
     planner_model, planner_tokenizer = FastLanguageModel.from_pretrained(
@@ -528,7 +540,8 @@ else:
 print("2. Loading Llama-3.2V-11B for Solver...")
 solver_model_id = "zhangsongbo365/Llama-3.2V-11B-cot-nf4"
 # Pin solver to GPU1 when other models use GPU0, otherwise GPU0
-_solver_gpu = "cuda:0" if PIPELINE_MODE == "solver-only" else "cuda:1"
+_solver_gpu = "cuda:0" 
+# if PIPELINE_MODE == "solver-only" else "cuda:1"
 solver_model = MllamaForConditionalGeneration.from_pretrained(
     solver_model_id,
     use_safetensors=True,
@@ -589,7 +602,7 @@ if _needs_verifier:
     verifier_model = VerifierModelClass.from_pretrained(
         _verifier_model_id,
         torch_dtype=torch.bfloat16,
-        device_map={"": "cuda:2"},
+        device_map={"": "cuda:0"},
         cache_dir=CACHE_DIR,
         ignore_mismatched_sizes=True,
     )

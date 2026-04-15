@@ -28,13 +28,14 @@
 #   tail -f /projects/cave-vlm-cot/logs/cave_<jobid>_<taskid>.out
 
 #SBATCH --job-name=cave-vlm-cot
-#SBATCH --array=0-149                  # 150 tasks: 3 experiments × 50 shards
+#SBATCH --array=100-104                  # 150 tasks: 3 experiments × 50 shards
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
-#SBATCH --gres=gpu:a40:3          # 3 GPUs per task (planner/solver/verifier)
+#SBATCH --gres=gpu:a100:1          # 3 GPUs per task (planner/solver/verifier)
 #SBATCH --mem=120G
-#SBATCH --time=1-00:00:00             # each shard is 1/50 of dataset, comfortably < 1 day
+#SBATCH --partition=a100_b2
+#SBATCH --time=0-12:00:00             # each shard is 1/50 of dataset, comfortably < 1 day
 #SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
 #SBATCH --output=/projects/cave-vlm-cot/logs/cave_%j_%a.out
 #SBATCH --error=/projects/cave-vlm-cot/logs/cave_%j_%a.err
@@ -126,8 +127,11 @@ source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
 export CAVE_PROJECT_DIR=/projects/cave-vlm-cot
 export HF_HOME=${CAVE_PROJECT_DIR}/hf_cache
 export TRANSFORMERS_CACHE=${CAVE_PROJECT_DIR}/hf_cache
+export UNSLOTH_COMPILED_CACHE=/projects/cave-vlm-cot/unsloth_compiled_cache
 # export HF_DATASETS_OFFLINE=1
 # export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1     # prevent HF network calls on compute node
+export UNSLOTH_DISABLE_STATISTICS=1
 export TQDM_DISABLE=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export MMMU_IMAGE_ROOT=${CAVE_PROJECT_DIR}/processed_images_mmmu
