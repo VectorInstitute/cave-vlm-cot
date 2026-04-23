@@ -1,24 +1,23 @@
 #!/bin/bash
-# cave_array.slurm — CaVe-VLM-CoT: all ablations, all shards, one submission
+# cave_array.slurm — CaVe-VLM-CoT: 5k ScienceQA ablation suite
 #
-# Launches 3 experiments × 50 shards = 150 SLURM array tasks.
+# Launches 3 experiments × 40 shards = 120
+# Submit the 1k ScienceQA ablation suite
+# each shard is 1/40
 #
-#   Task ID  │ EXPERIMENT_ID │ SHARD  │ --pipeline             │ --dataset  │ Notes
-#   ─────────┼───────────────┼────────┼────────────────────────┼────────────┼──────────────────
-#     0– 49  │      0        │  0–49  │ full                   │ scienceqa  │ baseline
-#    50– 99  │      1        │  0–49  │ no-citation-injector   │ scienceqa  │ ablation 3
-#    100–149 │      2        │  0–49  │ full                   │ mmmu       │ generalization
+#   Task ID  │ EXPERIMENT_ID │ SHARD  │ --pipeline        │ --dataset  │ Notes
+#   ─────────┼───────────────┼────────┼───────────────────┼────────────┼────────────────────
+#     0– 39  │      0        │  0–39  │ solver-only       │ scienceqa  │ baseline
+#    40– 79  │      1        │  0–39  │ retrieval-solver  │ scienceqa  │ retrieval ablation
+#    80– 119 │      2        │  0–39  │ full              │ scienceqa  │ CaVe-VLM-CoT
 #
-# Experiment 4 (weight sensitivity) runs as a separate downstream job
-# via cave_postprocess.sh after all array tasks complete:
-#   ARRAY_JOB_ID=$(sbatch --parsable cave_array.sh)
-#   sbatch --dependency=afterok:${ARRAY_JOB_ID} cave_postprocess.sh
-#
-# Submit everything:
+# Submit the 1k ScienceQA ablation suite:
 #   sbatch cave_array.sh
 #
-# Submit a single experiment group (e.g. baseline only):
-#   sbatch --array=0-49   cave_array.sh
+# Submit one experiment group:
+#   sbatch --array=0-19  cave_array.sh   # solver-only
+#   sbatch --array=20-39 cave_array.sh   # retrieval-solver
+#   sbatch --array=40-59 cave_array.sh   # full
 #
 # Resume a single failed task (e.g. task 47):
 #   sbatch --array=47 cave_array.sh
@@ -28,14 +27,13 @@
 #   tail -f /projects/cave-vlm-cot/logs/cave_<jobid>_<taskid>.out
 
 #SBATCH --job-name=cave-vlm-cot
-#SBATCH --array=100-104                  # 150 tasks: 3 experiments × 50 shards
+#SBATCH --array=0-119                 # 3 experiments × 20 shards over 5k ScienceQA
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
-#SBATCH --gres=gpu:a100:1          # 3 GPUs per task (planner/solver/verifier)
+#SBATCH --gres=gpu:a40:3          # 3 GPUs per task (planner/solver/verifier)
 #SBATCH --mem=120G
-#SBATCH --partition=a100_b2
-#SBATCH --time=0-12:00:00             # each shard is 1/50 of dataset, comfortably < 1 day
+#SBATCH --time=0-12:00:00             # each shard is 1/20 of the capped 5k dataset
 #SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
 #SBATCH --output=/projects/cave-vlm-cot/logs/cave_%j_%a.out
 #SBATCH --error=/projects/cave-vlm-cot/logs/cave_%j_%a.err
@@ -60,15 +58,15 @@ mkdir -p "${LOGDIR}" "${OUTDIR}" "${PROJECT_DIR}/hf_cache" "${PROJECT_DIR}/index
 
 # Derive experiment config and shard from flat task ID
 #
-#   SLURM_ARRAY_TASK_ID: 0–149 (flat index across all 150 tasks)
-#   EXPERIMENT_ID:       0–2   (which experiment group)
-#   SHARD_ID:            0–49  (which fiftieth of the dataset)
+#   SLURM_ARRAY_TASK_ID: 0–59
+#   EXPERIMENT_ID:       0–2
+#   SHARD_ID:            0–19  (which twentieth of the capped 5k dataset)
 #
 TASK_ID=${SLURM_ARRAY_TASK_ID}
-NUM_SHARDS=50
+NUM_SHARDS=40
 EXPERIMENT_ID=$(( TASK_ID / NUM_SHARDS ))
 SHARD_ID=$(( TASK_ID % NUM_SHARDS ))
-LAST_SHARD=$(( NUM_SHARDS - 1 ))   # = 49
+LAST_SHARD=$(( NUM_SHARDS - 1 ))   # = 19
 
 # Experiment tables (indexed by EXPERIMENT_ID)
 #
@@ -77,36 +75,26 @@ LAST_SHARD=$(( NUM_SHARDS - 1 ))   # = 49
 # sub-directory) experiments.py uses; it is not an env-var override any more.
 #
 PIPELINES=(
-    "full"                    # 0  full pipeline on ScienceQA (baseline)
-    "no-citation-injector"    # 1  ablation: full minus citation injector, ScienceQA
-    "full"                    # 2  full pipeline on MMMU (generalization)
+    "solver-only"             # 0  Solver only, no retrieval/verifier
+    "retrieval-solver"        # 1  Planner -> Retriever -> Solver
+    "full"                    # 2  Full CaVe-VLM-CoT
 )
 
 DATASETS=(
     "scienceqa"               # 0
     "scienceqa"               # 1
-    "mmmu"                    # 2
+    "scienceqa"               # 2
 )
 
 EXPERIMENT_LABELS=(
-    "baseline-full-scienceqa"           # 0
-    "ablation-no-citation-injector"     # 1
-    "generalization-full-mmmu"          # 2
+    "ablation-solver-only-scienceqa-1k"
+    "ablation-retrieval-solver-scienceqa-1k"
+    "full-cave-vlm-cot-scienceqa-1k"
 )
 
 PIPELINE="${PIPELINES[$EXPERIMENT_ID]}"
 DATASET="${DATASETS[$EXPERIMENT_ID]}"
 EXP_LABEL="${EXPERIMENT_LABELS[$EXPERIMENT_ID]}"
-
-# Shard calculation — MMMU is small, use fewer shards
-if [ "${DATASET}" = "mmmu" ]; then
-    NUM_SHARDS=5
-    SHARD_ID=$(( TASK_ID - 100 ))
-else
-    NUM_SHARDS=50
-    SHARD_ID=$(( TASK_ID % NUM_SHARDS ))
-fi
-LAST_SHARD=$(( NUM_SHARDS - 1 ))
 
 # Modules
 module purge
@@ -118,7 +106,7 @@ module load arrow
 module load python/3.11       # activates EBPYTHONPREFIXES
 module load scipy-stack
 module load faiss/1.12.0
-export PYTHONPATH=/cvmfs/.../site-packages:$PYTHONPATH   # path from above command
+export PYTHONPATH="${PROJECT_DIR}/env/lib/python3.11/site-packages:$PYTHONPATH"
 # Python comes from the virtualenv below — no separate python module needed
 
 source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
@@ -126,15 +114,26 @@ source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
 # Huggingface / PyTorch environment — all caches on project storage
 export CAVE_PROJECT_DIR=/projects/cave-vlm-cot
 export HF_HOME=${CAVE_PROJECT_DIR}/hf_cache
+export HF_HUB_CACHE=${CAVE_PROJECT_DIR}/hf_cache 
 export TRANSFORMERS_CACHE=${CAVE_PROJECT_DIR}/hf_cache
 export UNSLOTH_COMPILED_CACHE=/projects/cave-vlm-cot/unsloth_compiled_cache
 # export HF_DATASETS_OFFLINE=1
-# export TRANSFORMERS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1     # prevent HF network calls on compute node
 export UNSLOTH_DISABLE_STATISTICS=1
 export TQDM_DISABLE=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export MMMU_IMAGE_ROOT=${CAVE_PROJECT_DIR}/processed_images_mmmu
+
+# Verifier defaults for A40 runs. Override these in the sbatch environment
+# if you want to compare another judge without editing the script.
+export CAVE_VERIFIER_MODEL=${CAVE_VERIFIER_MODEL:-/projects/cave-vlm-cot/hf_cache/models--Qwen--Qwen2.5-VL-32B-Instruct/snapshots/7cfb30d71a1f4f49a57592323337a4a4727301da}
+export CAVE_VERIFIER_QUANTIZATION=${CAVE_VERIFIER_QUANTIZATION:-4bit}
+export CAVE_VERIFIER_DEVICE=${CAVE_VERIFIER_DEVICE:-cuda:2}
+export CAVE_VERIFIER_DEVICE_MAP=${CAVE_VERIFIER_DEVICE_MAP:-single}
+export CAVE_VERIFIER_MAX_PIXELS=${CAVE_VERIFIER_MAX_PIXELS:-768}
+export CAVE_MAX_SAMPLES=${CAVE_MAX_SAMPLES:-1000}
+export CAVE_SAMPLE_SEED=${CAVE_SAMPLE_SEED:-42}
 
 # API keys
 # set -a / source correctly handles values with special characters
@@ -152,6 +151,9 @@ echo "  Experiment   : ${EXP_LABEL}"
 echo "  Pipeline     : ${PIPELINE}"
 echo "  Dataset      : ${DATASET}"
 echo "  Shard        : ${SHARD_ID} / ${LAST_SHARD}"
+echo "  Max samples  : ${CAVE_MAX_SAMPLES}"
+echo "  Sample seed  : ${CAVE_SAMPLE_SEED}"
+echo "  Verifier     : ${CAVE_VERIFIER_MODEL} (${CAVE_VERIFIER_QUANTIZATION}, ${CAVE_VERIFIER_DEVICE_MAP}, max_pixels=${CAVE_VERIFIER_MAX_PIXELS})"
 echo "  Host         : $(hostname)"
 echo "  Started      : $(date)"
 
@@ -199,10 +201,10 @@ find "${LOGDIR}" -name "cave_*_${EXP_LABEL}*" -type f \
 
 # Main experiment
 #
-# --shard is passed explicitly because SLURM_ARRAY_TASK_ID is now 0–149
-# (the flat task index), not 0–49 (the shard index). Without this flag,
-# experiments.py would read SLURM_ARRAY_TASK_ID=57 and try shard 57 of 50
-# and crash
+# --shard is passed explicitly because SLURM_ARRAY_TASK_ID is now 0–59
+# (the flat task index), not 0–19 (the shard index). Without this flag,
+# experiments.py would read SLURM_ARRAY_TASK_ID=47 and try shard 47 of 20
+# and crash.
 #
 # --dataset is now driven by the DATASETS array above, not an env-var override.
 # This ensures each experiment group uses the correct dataset automatically
@@ -215,11 +217,19 @@ echo "Starting: ${EXP_LABEL}, shard ${SHARD_ID} of ${LAST_SHARD} ..."
 sleep 10
 python -c "import torch; torch.cuda.init(); print(f'GPUs ready: {torch.cuda.device_count()}')" || sleep 30
 
+sleep $(( (SLURM_ARRAY_TASK_ID % 5) * 120 ))
 python -u experiments.py              \
     --num-shards    "${NUM_SHARDS}"   \
     --shard         "${SHARD_ID}"     \
     --pipeline      "${PIPELINE}"     \
     --dataset       "${DATASET}"      \
+    --max-samples   "${CAVE_MAX_SAMPLES}" \
+    --sample-seed   "${CAVE_SAMPLE_SEED}" \
+    --verifier-model "${CAVE_VERIFIER_MODEL}" \
+    --verifier-quantization "${CAVE_VERIFIER_QUANTIZATION}" \
+    --verifier-device "${CAVE_VERIFIER_DEVICE}" \
+    --verifier-device-map "${CAVE_VERIFIER_DEVICE_MAP}" \
+    --verifier-max-pixels "${CAVE_VERIFIER_MAX_PIXELS}" \
     --no-traces                       \
     2>"${LOGDIR}/cave_${SLURM_JOB_ID}_${TASK_ID}.err" \
     >  "${LOGDIR}/cave_${SLURM_JOB_ID}_${TASK_ID}.out"
@@ -230,11 +240,11 @@ echo "Shard ${SHARD_ID} (task ${TASK_ID}) finished at $(date) with exit code ${E
 echo "  Task ${TASK_ID} (${EXP_LABEL}, shard ${SHARD_ID}) done — exit ${EXIT_CODE}"
 exit "${EXIT_CODE}"
 
-# ScienceQA full pipeline
-# sbatch --array=0-49 --gres=gpu:a40:3 -p a40_b3 --exclude=bn062,bn063,bn064,bn065,bn067,bn068,bn070,bn072,bn073 cave_array.sh
+# 1k ScienceQA solver-only
+# sbatch --array=0-39 --gres=gpu:a40:3 -p a40_b3 cave_array.sh
 
-# ScienceQA no-citation-injector
-# sbatch --array=50-99 --gres=gpu:a40:3 -p a40_b3 --exclude=bn062,bn063,bn064,bn065,bn067,bn068,bn070,bn072,bn073 cave_array.sh
+# 1k ScienceQA retrieval-solver
+# sbatch --array=40-79 --gres=gpu:a40:3 -p a40_b3 cave_array.sh
 
-# MMMU generalization
-# sbatch --array=100-104 --gres=gpu:a40:3 -p a40_b3 --exclude=bn062,bn063,bn064,bn065,bn067,bn068,bn070,bn072,bn073 cave_array.sh
+# 1k ScienceQA full CaVe-VLM-CoT
+# sbatch --array=80-119 --gres=gpu:a40:3 -p a40_b3 cave_array.sh

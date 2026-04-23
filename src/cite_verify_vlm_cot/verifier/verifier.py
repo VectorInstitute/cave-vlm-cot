@@ -27,6 +27,25 @@ from citation_injector.citation_injector import inject_citations_step, _build_te
 from prompts import VERIFIER_PROMPT_TEMPLATE
 from functools import partial
 
+def _extract_choice_letter(text: str) -> str:
+    """Return the first standalone multiple-choice letter from text, or INCONCLUSIVE."""
+    match = re.search(r'\b([A-E])\b', text or "", re.IGNORECASE)
+    return match.group(1).upper() if match else "INCONCLUSIVE"
+
+def _extract_labeled_choice(output: str, label: str) -> str:
+    match = re.search(
+        rf"{re.escape(label)}:\s*\*{{0,2}}\[?([A-E]|INCONCLUSIVE)\]?\*{{0,2}}",
+        output or "",
+        re.IGNORECASE,
+    )
+    return match.group(1).upper() if match else "INCONCLUSIVE"
+
+def _first_parameter_device(model) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def extract_topic_from_claim(claim: str) -> str:
     """Extract the topic being discussed from a claim"""
     # Remove citation markers
@@ -171,7 +190,7 @@ def parse_hallucination_details(full_output: str) -> List[Dict[str, str]]:
 
 def prepare_images_for_verifier(state):
     """
-    Prepare question image sources and descriptions for Qwen3-VL.
+    Prepare question image sources and descriptions for Qwen2.5-VL.
     ROI retrieval has been removed; only question images (from state.image_paths)
     are passed to the verifier, matching the solver's [Question Image N] citation format.
 
@@ -182,7 +201,7 @@ def prepare_images_for_verifier(state):
     descriptions = []
 
     MAX_IMAGES = 4  # keep low for consistent processor token counts
-    # Question images: use file:// path (Qwen3-VL supports local files)
+    # Question images: use file:// path (Qwen2.5-VL supports local files)
     
     # Question images (from paths)
     for idx, img_path in enumerate(state.image_paths or []):
@@ -226,7 +245,7 @@ def verifier_step(state: State, model, processor) -> State:
         # [Text Evidence N] labels seen by the verifier are identical to what the solver 
         # was shown and what citation_injector used for injection.
         all_text_chunks = _build_text_chunk_list(
-            state.retrieved_chunks, total_cap=15, truncate=500
+            state.retrieved_chunks, total_cap=15, truncate=400
         )
 
         text_evidence = "\n".join([
@@ -256,6 +275,8 @@ def verifier_step(state: State, model, processor) -> State:
         # producing "['<SUMMARY>...full output...']" (with brackets + quotes) in the prompt.
         # choices must also be a readable labeled string, not a raw Python list repr.
         solver_reasoning_str = "\n".join(state.reasoning_steps or [])
+        solver_reasoning_str = solver_reasoning_str[:1500]  # cap at ~375 tokens
+
         choices_str = "\n".join(
             f"{chr(ord('A') + i)}: {c}" for i, c in enumerate(state.choices or [])
         )
@@ -273,11 +294,12 @@ def verifier_step(state: State, model, processor) -> State:
         verifier_span.set_attribute("verifier.choices", json.dumps(state.choices))
         verifier_span.set_attribute("verifier.retry_attempt", state.retry_count)
         verifier_span.set_attribute("verifier.num_images", len(image_sources))
+        model_name = getattr(getattr(model, "config", None), "_name_or_path", model.__class__.__name__)
 
-        with tracer.start_as_current_span("Qwen3-VL-Verifier", openinference_span_kind="llm") as vlm_span:
-            vlm_span.set_attribute("vlm.model_name", "Qwen3-VL-8B")
+        with tracer.start_as_current_span("Qwen2.5-VL-Verifier", openinference_span_kind="llm") as vlm_span:
+            vlm_span.set_attribute("vlm.model_name", model_name)
 
-            # Official Qwen3-VL flow (https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct):
+            # Official Qwen2.5-VL flow (https://huggingface.co/Qwen/Qwen2.5-VL-8B-Instruct):
             # 1) Messages with image sources in content; 2) apply_chat_template; 
             # 3) process_vision_info(messages); 
             # 4) processor(text=..., images=image_inputs, videos=video_inputs)
@@ -300,25 +322,23 @@ def verifier_step(state: State, model, processor) -> State:
 
             if process_vision_info is None:
                 raise ImportError(
-                    "qwen_vl_utils is required for Qwen3-VL verifier. Install with: pip install qwen-vl-utils"
+                    "qwen_vl_utils is required for Qwen2.5-VL verifier. Install with: pip install qwen-vl-utils"
                 )
             image_inputs, video_inputs = process_vision_info(messages)
 
-            # Process inputs - Qwen3-VL specific format
+            print(f"[Verifier] Prompt length (chars): {len(prompt)}")
+            print(f"[Verifier] Solver reasoning length (chars): {len(solver_reasoning_str)}")
+            print(f"[Verifier] Text evidence length (chars): {len(text_evidence)}")
+
+            # Process inputs - Qwen2.5-VL specific format
             inputs = processor(
-                text=[text],  # text as list for Qwen3-VL
+                text=[text],  # text as list for Qwen2.5-VL
                 images=image_inputs,
                 videos=video_inputs,
                 padding=True,
-                max_length=8192,
+                # max_length=8192,
                 return_tensors="pt"
-            ).to(model.device)
-
-            # DEBUG: Uncomment to check what's being passed
-            print(f"DEBUG Verifier - Num images: {len(image_sources)}")
-            print(f"DEBUG Verifier - Input keys: {inputs.keys()}")
-            if "pixel_values" in inputs:
-                print(f"DEBUG Verifier - Pixel values shape: {inputs['pixel_values'].shape}")
+            ).to(_first_parameter_device(model))
 
             with torch.no_grad():
                 outputs = model.generate(
@@ -333,24 +353,12 @@ def verifier_step(state: State, model, processor) -> State:
             # Decode the output properly
             # outputs is a tensor of shape [batch_size, sequence_length]
             # Use batch_decode for proper decoding
-            decoded = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+            input_len = inputs['input_ids'].shape[1]
+            new_tokens = outputs[0][input_len:]
+            full_output = processor.decode(new_tokens, skip_special_tokens=True).strip()
+            decoded = full_output  # keep for vlm_span logging
 
-            # Extract just the assistant's response (after the prompt).
-            # Split on the role boundary marker (\nassistant\n) rather than
-            # the bare word "assistant", which also appears in the system
-            # prompt ("You are an expert reasoning assistant") and would cause
-            # a mis-split that drops most of the verification output.
-            parts = re.split(r'\nassistant\n', decoded, flags=re.IGNORECASE)
-            if len(parts) > 1:
-                full_output = parts[-1].strip()
-            elif "assistant" in decoded:
-                # Fallback for chat templates that omit the surrounding newlines
-                full_output = decoded.split("assistant")[-1].strip()
-            else:
-                full_output = decoded
-
-            print(f"Generated output length: {len(full_output)} characters")
-            print(f"Full output:\n{full_output[:500]}...")  # Print first 500 chars
+            print(f"[Verifier] Generated output length: {len(full_output)} characters")
 
             vlm_span.set_attribute("llm.output", full_output)
             vlm_span.set_attribute("llm.full_output", decoded)
@@ -360,10 +368,11 @@ def verifier_step(state: State, model, processor) -> State:
         state.confidence = "LOW"
         state.verifier_answer = "INCONCLUSIVE"
         state.hallucination = "UNKNOWN"
+        solver_answer = _extract_choice_letter(state.final_answer or "")
 
         # Parse the response and update state.
         # Use IGNORECASE throughout and handle markdown bold (**VERIFIED**) that
-        # Qwen3-VL sometimes emits.
+        # Qwen2.5-VL sometimes emits.
         final_verdict = re.search(
             r"Final\s+Verdict:\s*\*{0,2}\[?(VERIFIED|REJECTED)\]?\*{0,2}",
             full_output, re.IGNORECASE
@@ -392,36 +401,34 @@ def verifier_step(state: State, model, processor) -> State:
         if confidence_match:
             state.confidence = confidence_match.group(1).upper()
 
-        # Verified Answer: handle brackets, markdown bold, and IGNORECASE label.
-        answer_match = re.search(
-            r"Verified\s+Answer:\s*\*{0,2}\[?([A-E]|INCONCLUSIVE)\]?\*{0,2}",
-            full_output, re.IGNORECASE
+        # Prefer the judge's independent answer; fall back to Verified Answer only
+        # for older prompt outputs. Never recover an uncertain verifier answer from
+        # the solver, because that caused false accepts in the 425-row shard.
+        independent_answer = _extract_labeled_choice(full_output, "Independent Answer")
+        verified_answer = _extract_labeled_choice(full_output, "Verified Answer")
+        state.verifier_answer = (
+            independent_answer if independent_answer != "INCONCLUSIVE" else verified_answer
         )
-        if answer_match:
-            state.verifier_answer = answer_match.group(1).upper()
 
-        # verdict=VERIFIED but verifier still emitted INCONCLUSIVE —
-        # extract the solver's letter from state.final_answer directly.
+        # Multiple-choice answer adjudication: if the verifier names a different
+        # answer than the solver, force a rejection even if the free-text verdict
+        # says VERIFIED. This guards against permissive judge language.
+        if (
+            state.verifier_answer != "INCONCLUSIVE"
+            and solver_answer != "INCONCLUSIVE"
+            and state.verifier_answer != solver_answer
+        ):
+            if state.verdict == "VERIFIED":
+                print(f"  [ANSWER MISMATCH] verifier={state.verifier_answer} solver={solver_answer}; forcing REJECTED")
+            state.verdict = "REJECTED"
+            state.confidence = "HIGH" if state.confidence == "HIGH" else state.confidence
+
+        # If the verifier claims VERIFIED but did not provide an answer letter,
+        # treat it as an untrusted low-confidence rejection for retry/analysis.
         if state.verdict == "VERIFIED" and state.verifier_answer == "INCONCLUSIVE":
-            fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
-            if fa_match:
-                print(f"  [VERIFIER FALLBACK] verdict=VERIFIED but Verified Answer=INCONCLUSIVE "
-                      f"— recovering letter {fa_match.group(1)} from solver final_answer")
-                state.verifier_answer = fa_match.group(1)
-        
-        # verdict=REJECTED but verifier couldn't name the correct answer
-        # (Verified Answer=INCONCLUSIVE). The verifier prompt says to write INCONCLUSIVE
-        # when it detects a hallucination but doesn't know what the right answer is.
-        # A rejection without an alternative answer is not strong enough evidence to
-        # override the solver. Recover the solver's letter and downgrade to VERIFIED/LOW.
-        if state.verdict == "REJECTED" and state.verifier_answer == "INCONCLUSIVE":
-            fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
-            if fa_match:
-                state.verdict = "VERIFIED"
-                state.confidence = "LOW"
-                state.verifier_answer = fa_match.group(1)
-                print(f"  [INCONCLUSIVE REJECT FALLBACK] verdict=REJECTED but Verified Answer=INCONCLUSIVE "
-                      f"— verifier uncertain, recovering letter {fa_match.group(1)} from solver final_answer")
+            state.verdict = "REJECTED"
+            state.confidence = "LOW"
+            print("  [INCONCLUSIVE VERIFIED] verifier accepted without an independent answer; forcing REJECTED/LOW")
 
         halluc_match = re.search(
             r"Hallucination Check:\s*\[?(NONE DETECTED|MINOR HALLUCINATIONS|MAJOR HALLUCINATIONS)\]?",
@@ -462,21 +469,14 @@ def verifier_step(state: State, model, processor) -> State:
         verifier_span.set_attribute("verifier.retry_count", state.retry_count)
         verifier_span.set_attribute("verifier.confidence", state.confidence)
 
-    # If the verifier loop exits with verdict still UNKNOWN
-    # (regex failed on Final Verdict AND Hallucination Check lines), recover
-    # the solver's letter directly so downstream logic gets a usable state.
-    # Confidence is forced LOW to signal parse uncertainty.
+    # If the verifier output is unparseable, do not auto-accept. Mark it as a
+    # low-confidence rejection so the retry loop can attempt recovery and the
+    # metrics surface parser/model failures instead of hiding them as VERIFIED.
     if state.verdict == "UNKNOWN":
-        fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
-        if fa_match:
-            state.verdict = "VERIFIED"
-            state.confidence = "LOW"
-            state.verifier_answer = fa_match.group(1)
-            print(f"  [UNKNOWN FALLBACK] Verifier output unparseable — "
-                  f"recovering letter {state.verifier_answer} from solver final_answer")
-        else:
-            print(f"  [UNKNOWN FALLBACK] Verifier output unparseable and solver "
-                  f"final_answer yielded no letter — leaving INCONCLUSIVE")
+        state.verdict = "REJECTED"
+        state.confidence = "LOW"
+        state.verifier_answer = "INCONCLUSIVE"
+        print("  [UNKNOWN FALLBACK] Verifier output unparseable; forcing REJECTED/LOW")
 
     return state
 
@@ -501,10 +501,11 @@ def should_retry_planning(state: State, max_retries: int = 3) -> bool:
     # MEDIUM confidence on a MINOR hallucination
     # finding is uncertain enough to warrant one more attempt — the verifier
     # may have misread the image or been misled by injected text citations.
-    if state.hallucination == "MINOR HALLUCINATIONS" and state.confidence in [
-        "LOW",
-        "MEDIUM",
-    ]:
+    if state.hallucination == "MINOR HALLUCINATIONS":
+    # and state.confidence in [
+    #     "LOW",
+    #     "MEDIUM",
+    # ]:
         return True
 
     return False
@@ -534,22 +535,48 @@ def _should_skip_verifier(state: State) -> bool:
     """
     Return True when the verifier can be safely skipped.
 
-    Motivation: 80% of verifier calls in the n=100 SLURM run produced the
-    minimal 160-char output (NONE DETECTED / VERIFIED / HIGH), meaning the
-    verifier added no information and cost ~12s of VLM inference for nothing.
-    These cases share three properties:
-      1. No question images (text-only question — no visual hallucination risk).
-      2. Solver produced multiple text citations (answer is grounded in evidence).
-      3. Answer extraction succeeded (a letter A–E is in final_answer).
+    Two distinct skip conditions:
 
-    We require ALL three conditions to fire, which keeps the skip rate
-    conservative.  Image questions always proceed to the full verifier
-    because visual hallucinations (misread diagrams, wrong particle counts,
-    incorrect label readings) are the failure mode the verifier is best at
-    catching, and they cannot be detected from citation counts alone.
-    Skip rate at n=100: ~40% (text-only questions with ≥2 citations).
-    Expected time saving: ~12s × 0.40 × 5000 = ~67 GPU-hours.
+    Condition A — RETRIEVAL FAILURE:
+    When the retriever found no usable evidence (no text chunks across all
+    sub-queries), calling the verifier is pointless: the solver had nothing
+    to cite, so the verifier will flag every reasoning step as a fake citation
+    and REJECT with HIGH confidence — not because the answer is wrong, but
+    because retrieval failed. This is not a hallucination; it is a retrieval
+    gap. Firing a retry from this state wastes the retry budget without
+    improving evidence coverage (the Extractor already ran, the KB simply
+    doesn't contain the answer).
+    Diagnosis: In the 21k ScienceQA run with Qwen2.5-8B extractor, 92.5% of
+    REJECTED verdicts had a correct final answer, and 99.3% were flagged
+    HIGH confidence — a clear sign the verifier was penalising retrieval
+    failure rather than detecting genuine hallucinations.
+
+    Condition B — TEXT-ONLY + WELL-CITED (original logic):
+    No question images + solver produced ≥2 text citations + answer letter
+    extracted successfully → verifier adds no information.
+    Skip rate at n=100: ~40%. Expected time saving: ~12s × 0.40.
+    Image questions always proceed to the full verifier because visual
+    hallucinations cannot be detected from citation counts alone.
     """
+    # Condition A: retrieval completely failed
+    # Count total text chunks across all sub-queries in retrieved_chunks.
+    # Keys starting with "_" are metadata, not query results; skip them.
+    # Keys starting with "dk_" are DuckDuckGo web snippets — count them too.
+    total_chunks = 0
+    for key, val in (state.retrieved_chunks or {}).items():
+        if key.startswith("_"):
+            continue
+        chunks = val.get("text_chunks", []) if isinstance(val, dict) else []
+        total_chunks += len([c for c in chunks if isinstance(c, str) and len(c.strip()) > 10])
+
+    if total_chunks == 0:
+        # No evidence retrieved at all — verifier will spuriously REJECT.
+        # Auto-verify instead so the solver's parametric answer is preserved.
+        print(f"  [VerifierSkip] Zero text chunks retrieved — "
+              f"skipping verifier to avoid spurious retrieval-failure rejection.")
+        return True
+
+    # Condition B: text-only + well-cited
     # Never skip for image questions
     has_images = any(
         p for p in (state.image_paths or []) if p and os.path.exists(p)
@@ -575,6 +602,11 @@ def _auto_verify_step(state: State) -> State:
     Lightweight verifier substitute used when _should_skip_verifier() fires.
     Sets VERIFIED/HIGH/NONE DETECTED directly from the solver output so the
     rest of the graph (should_plan, logging) sees a fully populated state.
+
+    Called for two reasons (see _should_skip_verifier):
+      A) Zero chunks retrieved — verifier would spuriously reject due to
+         missing citations that were never available.
+      B) Text-only question with ≥2 citations — verifier adds no signal.
     """
     fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
     letter = fa_match.group(1) if fa_match else "INCONCLUSIVE"
@@ -586,28 +618,49 @@ def _auto_verify_step(state: State) -> State:
     state.verifier_feedback = None
     log_attempt(state)
     state.retry_count += 1
-    reasoning_text = ' '.join(state.reasoning_steps or [])
-    cite_count = len(re.findall(r'\[Text Evidence \d+\]', reasoning_text))
-    print(f"  [VerifierSkip] Text-only + {cite_count} citations → auto-VERIFIED ({letter})")
+    
+    # Determine skip reason for logging
+    total_chunks = sum(
+        len([c for c in (v.get("text_chunks", []) if isinstance(v, dict) else [])
+             if isinstance(c, str) and len(c.strip()) > 10])
+        for k, v in (state.retrieved_chunks or {}).items()
+        if not k.startswith("_")
+    )
+    if total_chunks == 0:
+        print(f"  [VerifierSkip/RetrievalFailure] No chunks → auto-VERIFIED ({letter})")
+    else:
+        reasoning_text = ' '.join(state.reasoning_steps or [])
+        cite_count = len(re.findall(r'\[Text Evidence \d+\]', reasoning_text))
+        print(f"  [VerifierSkip/WellCited] Text-only + {cite_count} citations → auto-VERIFIED ({letter})")
     return state
 
+# def _conditional_verifier_step(verifier_model, verifier_processor) -> callable:
+#     """
+#     Returns a node function that either runs the full VLM verifier or the
+#     lightweight auto-verify stub, depending on _should_skip_verifier().
+#     Wraps both paths in an OpenTelemetry span for consistent tracing.
+#     """
+#     _full_verifier = partial(verifier_step, model=verifier_model, processor=verifier_processor)
+#     def _node(state: State) -> State:
+#         with tracer.start_as_current_span(
+#             "Verifier", openinference_span_kind="chain"
+#         ) as span:
+#             if _should_skip_verifier(state):
+#                 span.set_attribute("verifier.skipped", True)
+#                 return _auto_verify_step(state)
+#             span.set_attribute("verifier.skipped", False)
+#             # verifier_step opens its own child span internally; the outer
+#             # span here just provides a consistent entry point for the graph.
+#             return _full_verifier(state)
+#     return _node
+
 def _conditional_verifier_step(verifier_model, verifier_processor) -> callable:
-    """
-    Returns a node function that either runs the full VLM verifier or the
-    lightweight auto-verify stub, depending on _should_skip_verifier().
-    Wraps both paths in an OpenTelemetry span for consistent tracing.
-    """
     _full_verifier = partial(verifier_step, model=verifier_model, processor=verifier_processor)
     def _node(state: State) -> State:
         with tracer.start_as_current_span(
             "Verifier", openinference_span_kind="chain"
         ) as span:
-            if _should_skip_verifier(state):
-                span.set_attribute("verifier.skipped", True)
-                return _auto_verify_step(state)
             span.set_attribute("verifier.skipped", False)
-            # verifier_step opens its own child span internally; the outer
-            # span here just provides a consistent entry point for the graph.
             return _full_verifier(state)
     return _node
 

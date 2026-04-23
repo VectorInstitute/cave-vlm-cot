@@ -234,11 +234,17 @@ Based on Step 3, classify:
 - MINOR HALLUCINATIONS: citation slightly misrepresents evidence but conclusion is still plausible
 - MAJOR HALLUCINATIONS: citation is fabricated, contradicts evidence, or conclusion depends on a false claim
 
-STEP 5 — RENDER VERDICT
-Given the hallucination classification, decide:
-- VERIFIED: the solver's answer is well-supported and hallucination-free (or only minor)
-- REJECTED: the solver's answer depends on a major hallucination
+STEP 5 — SOLVE AND RENDER VERDICT
+First solve the multiple-choice question yourself from the shown question image(s),
+text evidence, and choices. Choose exactly one letter when the answer is visible or
+deducible. Then compare your independent answer with the solver's final answer.
 
+Decision rule:
+- VERIFIED: your independent answer matches the solver's final answer letter AND
+  there is no major evidence contradiction.
+- REJECTED: your independent answer does not match the solver's final answer letter,
+  the solver's answer cannot be supported, or the solver relies on a major false claim.
+- If uncertain, prefer REJECTED with Confidence: LOW. Do not rubber-stamp the solver.
 ---
 OUTPUT FORMAT (use EXACTLY this format after completing the steps above):
 
@@ -256,16 +262,23 @@ Final Verdict: [VERIFIED] or [REJECTED]
 
 Confidence: [HIGH] or [MEDIUM] or [LOW]
 
-Verified Answer: [copy the answer letter here — see rule below]
+Independent Answer: [A/B/C/D/E or INCONCLUSIVE]
+
+Solver Answer: [A/B/C/D/E or INCONCLUSIVE]
+
+Verified Answer: [A/B/C/D/E or INCONCLUSIVE — see rule below]
 
 VERIFIED ANSWER RULE (mandatory):
-- If Final Verdict is VERIFIED → copy the letter from SOLVER'S ANSWER (e.g. if solver said "The answer is B", write: Verified Answer: B)
-- If Final Verdict is REJECTED and you know the correct answer → write that letter (e.g. Verified Answer: C)
-- If Final Verdict is REJECTED and you cannot determine the correct answer → write: Verified Answer: INCONCLUSIVE
+- Always write your own independently chosen answer in Independent Answer.
+- If Independent Answer is A/B/C/D/E → copy it to Verified Answer.
+- If Independent Answer is INCONCLUSIVE → write Verified Answer: INCONCLUSIVE.
+- Never copy the solver's answer merely because Final Verdict is VERIFIED.
 
 EXAMPLE — do not copy, just follow the pattern:
   SOLVER'S ANSWER: The answer is B: Container B has higher concentration
+  Independent Answer: B
+  Solver Answer: B
   Final Verdict: [VERIFIED]
   Confidence: [HIGH]
-  Verified Answer: B       ← copied from solver since VERIFIED
+  Verified Answer: B 
 """

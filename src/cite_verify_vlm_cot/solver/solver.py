@@ -403,7 +403,7 @@ def solver_step(state: State, model, processor, kwargs) -> State:
             print(f"  Citations: {len(text_cites)} text, {len(image_cites)} image "
                   f"({'cited' if image_cites else 'not cited'})")            
             if images and not image_cites and not has_observations:
-                print(f"  [DEBUG] Image passed but not cited. Full output:\n{full_output}\n")
+                print(f"  [Solver] Image passed but not cited — citation injector will handle.")
             
             vlm_span.set_attribute("llm.output", full_output[:2000])
         

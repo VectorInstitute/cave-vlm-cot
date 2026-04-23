@@ -300,6 +300,7 @@ def planner_step(state: State, model, tokenizer, kwargs) -> State:
                 prompt = prompt.rstrip() + "\n" + feedback_note + "\n"
 
         planner_span.set_attribute("planner.has_feedback", bool(state.verifier_feedback))
+        planner_span.set_attribute("verifier feedback", state.verifier_feedback)
         planner_span.set_attribute("planner.retry_attempt", state.retry_count)
         planner_span.set_attribute("planner.question", state.question)
         planner_span.set_attribute("planner.choices", json.dumps(state.choices))
@@ -308,9 +309,9 @@ def planner_step(state: State, model, tokenizer, kwargs) -> State:
 
         # LLM inference
         with tracer.start_as_current_span(
-            "Qwen3-8B", openinference_span_kind="llm"
+            "Qwen2.5-7B", openinference_span_kind="llm"
         ) as llm_span:
-            llm_span.set_attribute("llm.model_name", "unsloth/Qwen3-8B-bnb-4bit")
+            llm_span.set_attribute("llm.model_name", "unsloth/Qwen2.5-7B-Instruct-bnb-4bit")
             llm_span.set_attribute("llm.input_messages", str(messages))
 
             text = tokenizer.apply_chat_template(

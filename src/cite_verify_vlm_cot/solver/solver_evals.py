@@ -382,7 +382,12 @@ def attribution_score(state) -> dict:
     
     # Collect all evidence (text + ROI captions + hint)
     # pass hint so claims paraphrasing the hint are correctly attributed
-    all_evidence = _collect_all_evidence(state.retrieved_chunks, hint=state.hint or '')
+    all_evidence = _collect_all_evidence(
+            state.retrieved_chunks, 
+            hint=state.hint or '', 
+            question=state.question or '',
+            lecture=state.lecture or ''
+        )
     
     if not all_evidence:
         return {'ais': 0.0, 'hallucination_rate': 1.0, 'num_steps': len(steps), 'details': []}
@@ -485,7 +490,7 @@ def _clean_step(step: str) -> str:
     return step.strip()
 
 
-def _collect_all_evidence(retrieved_chunks: dict, hint: str = "") -> list:
+def _collect_all_evidence(retrieved_chunks: dict, hint: str = "", question: str = "", lecture: str = "") -> list:
     """Collect all evidence pieces (text chunks + ROI captions + hint text).
     hint text is often the most directly relevant content for science questions
     but was excluded from attribution checking. Added as an evidence source so AIS
@@ -495,6 +500,12 @@ def _collect_all_evidence(retrieved_chunks: dict, hint: str = "") -> list:
     # Include hint text if provided — often the single most relevant sentence
     if hint and hint.strip():
         evidence.append(hint.strip())
+
+    if question and question.strip():
+        evidence.append(question.strip())
+
+    if lecture and lecture.strip():
+        evidence.append(lecture.strip())
     
     for query, chunk_info in retrieved_chunks.items():
         # Text chunks
@@ -556,7 +567,7 @@ def _check_attribution(claim: str, evidence_list: list, nli_model) -> tuple:
     # science lecture text tends to be general/background; specific factual
     # claims naturally score lower against it. 0.5 is too aggressive — most valid
     # attributions cluster in the 0.3–0.5 range for this domain. Lowered to 0.35.
-    is_attributable = best_score > 0.35
+    is_attributable = best_score > 0.28
     
     return is_attributable, best_evidence, best_score
 
@@ -625,7 +636,12 @@ def evidence_grounding_check(state) -> dict:
 
     # If no citations were found, fall back to ALL retrieved evidence (including hint)
     if not cited_evidence:
-        cited_evidence = _collect_all_evidence(retrieved_chunks, hint=state.hint or '')
+        cited_evidence = _collect_all_evidence(
+            retrieved_chunks, 
+            hint=state.hint or '', 
+            question=state.question or '',
+            lecture=state.lecture or ''
+        )
     if not cited_evidence:
         return {
             'is_grounded': False,

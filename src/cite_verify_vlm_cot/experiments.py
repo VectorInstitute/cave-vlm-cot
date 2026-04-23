@@ -39,6 +39,9 @@ PROJECT_DIR = os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot")
 if not os.path.isdir(PROJECT_DIR):
     print(f"[Storage] Project dir {PROJECT_DIR} not found, falling back to ~/cave-vlm-cot")
     PROJECT_DIR = os.path.join(HOME_DIR, "cave-vlm-cot")
+# Explicit cache path — bypasses HF_HOME/HF_HUB_CACHE env var confusion
+# Models are stored at PROJECT_DIR/hf_cache/ (not .../hf_cache/hub/)
+VERIFIER_CACHE = os.path.join(PROJECT_DIR, "hf_cache")
 WORKDIR = os.path.join(HOME_DIR, "cave-vlm-cot/src/cite_verify_vlm_cot")
 
 # Shard configuration
@@ -58,7 +61,18 @@ _parser.add_argument("--shard",      type=int, default=None,
                      help="0-based shard index to process")
 _parser.add_argument("--num-shards", type=int, default=1,
                      help="Total number of shards (default: 1 = no sharding)")
-
+_parser.add_argument(
+    "--max-samples",
+    type=int,
+    default=int(os.environ.get("CAVE_MAX_SAMPLES", 0)),
+    help="Optional deterministic random sample size before sharding. 0 means use all rows.",
+)
+_parser.add_argument(
+    "--sample-seed",
+    type=int,
+    default=int(os.environ.get("CAVE_SAMPLE_SEED", 42)),
+    help="Random seed used when --max-samples is set.",
+)
 # Ablation / experiment selection
 _parser.add_argument(
     "--pipeline",
@@ -74,6 +88,47 @@ _parser.add_argument(
     ),
 )
 _parser.add_argument(
+    "--verifier-model",
+    type=str,
+    default=os.environ.get("CAVE_VERIFIER_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"),
+    help=(
+        "Verifier VLM model id or local path. For A40 runs, the recommended default "
+        "is Qwen/Qwen2.5-VL-32B-Instruct with --verifier-quantization 4bit."
+    ),
+)
+_parser.add_argument(
+    "--verifier-quantization",
+    type=str,
+    default=os.environ.get("CAVE_VERIFIER_QUANTIZATION", "4bit"),
+    choices=["4bit", "8bit", "bf16"],
+    help="Verifier loading precision. 4bit is recommended for 32B on a single A40.",
+)
+_parser.add_argument(
+    "--verifier-device",
+    type=str,
+    default=os.environ.get("CAVE_VERIFIER_DEVICE", "cuda:2"),
+    help="Device for the verifier when using a single-device map.",
+)
+_parser.add_argument(
+    "--verifier-device-map",
+    type=str,
+    default=os.environ.get("CAVE_VERIFIER_DEVICE_MAP", "single"),
+    choices=["single", "auto"],
+    help=(
+        "Use 'single' to pin verifier to --verifier-device, or 'auto' to let "
+        "Transformers shard the verifier. Keep 'single' for 32B 4bit on A40."
+    ),
+)
+_parser.add_argument(
+    "--verifier-max-pixels",
+    type=int,
+    default=int(os.environ.get("CAVE_VERIFIER_MAX_PIXELS", 768)),
+    help=(
+        "Verifier image token budget multiplier in units of 28*28 pixels. "
+        "Lower is faster; 768 is a good 5k-sample A40 throughput default."
+    ),
+)
+_parser.add_argument(
     "--no-traces",
     action="store_true",
     default=False,
@@ -82,6 +137,12 @@ _parser.add_argument(
         "(datasets, evaluators) are still saved — only per-span trace data\n"
         "is suppressed. Saves significant storage on large runs."
     ),
+)
+_parser.add_argument(
+    "--local-results",
+    action="store_true",
+    default=os.environ.get("CAVE_LOCAL_RESULTS", "0").lower() in {"1", "true", "yes"},
+    help="Bypass Phoenix dataset upload/run_experiment and write per-shard CSV results locally.",
 )
 _parser.add_argument(
     "--dataset",
@@ -100,9 +161,17 @@ SHARD_INDEX = _args.shard if _args.shard is not None else (
 )
 NUM_SHARDS = _args.num_shards
 PIPELINE_MODE  = _args.pipeline        # "full" | "retrieval-solver" | "solver-only" | "no-citation-injector"
-MODEL_VARIANT  = "qwen3"              # Qwen3 is now the only supported model family
+MODEL_VARIANT  = "qwen25"             # qwen25 = Qwen2.5 extractor (reverted from Qwen3)
 NO_TRACES      = _args.no_traces       # suppress span export to save Phoenix storage
+LOCAL_RESULTS  = _args.local_results   # bypass Phoenix completely and write local CSV
 DATASET_NAME = _args.dataset
+MAX_SAMPLES = _args.max_samples
+SAMPLE_SEED = _args.sample_seed
+VERIFIER_MODEL_ID = _args.verifier_model
+VERIFIER_QUANTIZATION = _args.verifier_quantization
+VERIFIER_DEVICE = _args.verifier_device
+VERIFIER_DEVICE_MAP = _args.verifier_device_map
+VERIFIER_MAX_PIXELS = _args.verifier_max_pixels
 
 # Validate
 if not (0 <= SHARD_INDEX < NUM_SHARDS):
@@ -110,9 +179,11 @@ if not (0 <= SHARD_INDEX < NUM_SHARDS):
 print(f"[Shard]    Running shard {SHARD_INDEX + 1} / {NUM_SHARDS}")
 print(f"[Pipeline] {PIPELINE_MODE}")
 print(f"[Models]   extractor/verifier variant: {MODEL_VARIANT}")
+print(f"[Verifier] model={VERIFIER_MODEL_ID} quantization={VERIFIER_QUANTIZATION} device_map={VERIFIER_DEVICE_MAP}")
 print(f"[Traces]   {'DISABLED (--no-traces)' if NO_TRACES else 'enabled'}")
+print(f"[Results]  {'LOCAL CSV (--local-results)' if LOCAL_RESULTS else 'Phoenix'}")
 
-CACHE_DIR = CACHE_DIR = os.path.join(PROJECT_DIR, "hf_cache")
+CACHE_DIR = os.path.join(PROJECT_DIR, "hf_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
@@ -157,9 +228,15 @@ _CSV_MAP = {
     "mmmu":      os.path.join(PROJECT_DIR, "outputs/mmmu_augmented.csv"),
 }
 df = pd.read_csv(_CSV_MAP[DATASET_NAME])
-# df = df.iloc[:10]
-df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-
+# df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+# df = df.iloc[:5]
+if MAX_SAMPLES > 0:
+    sample_n = min(MAX_SAMPLES, len(df))
+    df = df.sample(n=sample_n, random_state=SAMPLE_SEED).reset_index(drop=True)
+    print(
+        f"[Data]     Using deterministic random sample of {len(df)} rows "
+        f"(--max-samples {MAX_SAMPLES}, --sample-seed {SAMPLE_SEED})"
+    )
 # Shard the dataframe.
 # Each shard gets a contiguous, non-overlapping slice.
 # If the CSV is not pre-shuffled by subject, add:
@@ -195,7 +272,7 @@ for idx, row in df.iterrows():
             return []
 
     choices = parse_choices(choices)
-    gold_answer = choices[answer] if choices and 0 <= int(answer) < len(choices) else ""
+    gold_answer = choices[answer] if isinstance(choices, list) and choices and 0 <= int(answer) < len(choices) else ""
 
     # Parse image_paths
     image_paths = safe_parse_json(row.get("image_paths"), default=[])
@@ -236,26 +313,51 @@ experiments_client = Client(
 )
 
 # Upload dataset to Phoenix
-try:
-    cave_dataset = experiments_client.datasets.create_dataset(
-        name=f"{DATASET_NAME}-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
-        dataframe=experiment_df,
-        input_keys=[
-            "pid", "question", "hint", "choices", "lecture", "answer", 
-            "image_paths", "img_captions", "img_ocr",
-            "subject", "topic", "category", "skill", "dataset",
-        ],
-        output_keys=["gold_answer"],
-        timeout=300,
-    )
-    print(f"Created dataset: {cave_dataset.name}  ({len(experiment_df)} examples)")
-except Exception as e:
-    print(f"Dataset creation note: {e}")
-    cave_dataset = experiments_client.datasets.get_dataset(
-        dataset=f"{DATASET_NAME}-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
-        timeout=10000
-    )
-    print(f"Using existing dataset: {cave_dataset.name}")
+def create_or_get_dataset(client, name, df, input_keys, output_keys, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            dataset = client.datasets.create_dataset(
+                name=name,
+                dataframe=df,
+                input_keys=input_keys,
+                output_keys=output_keys,
+                timeout=300,
+            )
+            print(f"Created dataset: {dataset.name}")
+            return dataset
+        except Exception as e:
+            print(f"Upload attempt {attempt+1} failed: {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc()
+            if attempt < max_retries - 1:
+                wait = 30 * (attempt + 1)   # 30s, 60s, 90s backoff
+                print(f"Retrying in {wait}s...")
+                time.sleep(wait)
+
+    # Fallback: try exact name AND name with ±1 row count (handles dropped bad rows)
+    row_count = int(name.split("_")[-1])
+    candidate_names = [name, name.replace(f"_{row_count}", f"_{row_count - 1}"),
+                             name.replace(f"_{row_count}", f"_{row_count + 1}")]
+    for candidate in candidate_names:
+        try:
+            dataset = client.datasets.get_dataset(dataset=candidate, timeout=10000)
+            print(f"Using existing dataset: {dataset.name}")
+            return dataset
+        except Exception:
+            continue
+
+    raise RuntimeError(f"Could not create or fetch dataset '{name}'")
+
+cave_dataset = create_or_get_dataset(
+    client=experiments_client,
+    name=f"{DATASET_NAME}-cave-vlm-cot-shard{SHARD_INDEX}-of-{NUM_SHARDS}_{len(df)}",
+    df=experiment_df,
+    input_keys=[
+        "pid", "question", "hint", "choices", "lecture", "answer",
+        "image_paths", "img_captions", "img_ocr",
+        "subject", "topic", "category", "skill", "dataset",
+    ],
+    output_keys=["gold_answer"],
+)
 
 
 # Define Evaluators
@@ -520,17 +622,31 @@ print("\nLoading models for the pipeline...")
 #     do_sample=False and ensure the tokenizer chat template does NOT inject
 #     <think> tokens (pass enable_thinking=False if the template supports it).
 if _needs_planner:
-    # _planner_model_id = "unsloth/Qwen3-8B-bnb-4bit"
-    _planner_model_id = "/projects/cave-vlm-cot/hf_cache/hub/models--unsloth--Qwen3-8B-bnb-4bit/snapshots/1deaf68f694c40dbce295da300851729d759b21a"
-    print(f"1. Loading Qwen3-8B for Planner...")
+    # Reverted from Qwen3-8B back to Qwen2.5-7B-Instruct.
+    # Reason: Qwen3-8B generated only 2-3 subqueries per question due to two bugs:
+    #   1. Thinking-mode leakage: Qwen3 emits internal chain-of-thought into output
+    #      which the parser mistook for query strings.
+    #   2. Prompt mismatch: Qwen3 collapsed the structured-list prompt into a minimal
+    #      template, producing only "X definition properties characteristics" queries.
+    # Result: Planner Hit Rate dropped from 63% → 16%, AIS 62% → 20%,
+    #         Hallucination Rate 38% → 80% across 21k ScienceQA examples.
+    # Qwen2.5-7B reliably generates 7-8 diverse, targeted subqueries under this prompt.
+    # _planner_model_id = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
+    _planner_model_id = "/projects/cave-vlm-cot/hf_cache/hub/models--unsloth--Qwen2.5-7B-Instruct-bnb-4bit/snapshots/bdd404162d94997f390efbfa660eb3f21cbbc81d"
+    print(f"1. Loading Qwen2.5-7B-Instruct for Planner (reverted from Qwen3-8B)...")
 
     planner_model, planner_tokenizer = FastLanguageModel.from_pretrained(
         model_name=_planner_model_id,
         max_seq_length=4096,
         load_in_4bit=True,
+        device_map={"": "cuda:0"}, 
     )
     FastLanguageModel.for_inference(planner_model)
-    planner_kwargs = dict(do_sample=False, max_new_tokens=128)
+    # max_new_tokens raised from 128→512: Qwen2.5 needs more tokens to generate
+    # 7-8 diverse subqueries; 128 was causing truncation with Qwen3 and is too
+    # tight for the longer JSON arrays Qwen2.5 produces.
+    planner_kwargs = dict(do_sample=False, max_new_tokens=512)
+
 else:
     print("1. Skipping Planner model (not needed for solver-only pipeline)")
     planner_model = planner_tokenizer = None
@@ -540,7 +656,7 @@ else:
 print("2. Loading Llama-3.2V-11B for Solver...")
 solver_model_id = "zhangsongbo365/Llama-3.2V-11B-cot-nf4"
 # Pin solver to GPU1 when other models use GPU0, otherwise GPU0
-_solver_gpu = "cuda:0" 
+_solver_gpu = "cuda:1" 
 # if PIPELINE_MODE == "solver-only" else "cuda:1"
 solver_model = MllamaForConditionalGeneration.from_pretrained(
     solver_model_id,
@@ -550,7 +666,7 @@ solver_model = MllamaForConditionalGeneration.from_pretrained(
     trust_remote_code=True,
     cache_dir=CACHE_DIR,
 )
-solver_processor = AutoProcessor.from_pretrained(solver_model_id)
+solver_processor = AutoProcessor.from_pretrained(solver_model_id, cache_dir=CACHE_DIR)
 # temperature=0.3 caused 26 new INCONCLUSIVEs: solver conclusions varied
 # enough that the verifier emitted INCONCLUSIVE on previously-stable questions.
 # temperature=0.1 keeps light stochasticity
@@ -559,53 +675,55 @@ solver_processor = AutoProcessor.from_pretrained(solver_model_id)
 solver_kwargs = dict(do_sample=False, max_new_tokens=1024)
 # , temperature=0.1, top_p=0.95
 
-# 3. Verifier — Qwen3-VL-7B — pinned to GPU2 (~15GB, leaves 65GB headroom)
-# Qwen3   variant : Qwen/Qwen3-VL-8B-Instruct     (GPU 2)
-#   • Qwen3-VL requires transformers ≥ 4.52 with Qwen3VLForConditionalGeneration.
-#   • Verify the exact hub ID at https://huggingface.co/Qwen before running.
+# 3. Verifier — Qwen2.5-VL judge.
+# A40 recommendation for 5k-sample runs:
+#   Qwen/Qwen2.5-VL-32B-Instruct, 4-bit, pinned to cuda:2.
+# This is a large enough jump from 7B to reduce the observed false-accept
+# behavior while still fitting on one 48GB A40 with conservative image tokens.
 if _needs_verifier:
-    _verifier_model_id = "Qwen/Qwen3-VL-8B-Instruct"
-    print(f"3. Loading Qwen3-VL-8B for Verifier...")
+    _verifier_model_id = VERIFIER_MODEL_ID
+    print(f"3. Loading verifier: {_verifier_model_id} ({VERIFIER_QUANTIZATION}, {VERIFIER_DEVICE_MAP})...")
+    # _verifier_model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+    # _verifier_model_id = "/projects/cave-vlm-cot/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5"
+    # _verifier_model_id = "Qwen/Qwen2.5-VL-72B-Instruct"
+    # _verifier_model_id = "/projects/cave-vlm-cot/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/89c86200743eec961a297729e7990e8f2ddbc4c5"
 
     verifier_processor = AutoProcessor.from_pretrained(
         _verifier_model_id,
+        cache_dir=VERIFIER_CACHE,
         min_pixels=256 * 28 * 28,
-        max_pixels=1280 * 28 * 28,
+        max_pixels=VERIFIER_MAX_PIXELS * 28 * 28,
+        trust_remote_code=True,
     )
 
-    # Model class resolution: prefer Qwen3VLForConditionalGeneration.
-    # Fallback chain ensures backward compatibility with older transformers installs.
-    VerifierModelClass = None
-    try:
-        from transformers import Qwen3VLForConditionalGeneration
-        VerifierModelClass = Qwen3VLForConditionalGeneration
-    except ImportError:
-        print(
-            "WARNING: Qwen3VLForConditionalGeneration not found — "
-            "falling back to Qwen2_5_VLForConditionalGeneration. "
-            "Upgrade transformers: pip install --upgrade transformers"
-        )
+    from transformers import BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
+    VerifierModelClass = Qwen2_5_VLForConditionalGeneration
 
-    if VerifierModelClass is None:
-        try:
-            from transformers import Qwen2_5_VLForConditionalGeneration
-            VerifierModelClass = Qwen2_5_VLForConditionalGeneration
-        except ImportError:
-            from transformers import Qwen2VLForConditionalGeneration
-            VerifierModelClass = Qwen2VLForConditionalGeneration
-            print(
-                "WARNING: Qwen2_5_VLForConditionalGeneration not found. "
-                "Using Qwen2VLForConditionalGeneration as last-resort fallback. "
-                "Upgrade with: pip install git+https://github.com/huggingface/transformers"
-            )
+    verifier_load_kwargs = dict(
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+    if VERIFIER_DEVICE_MAP == "auto":
+        verifier_load_kwargs["device_map"] = "auto"
+    else:
+        verifier_load_kwargs["device_map"] = {"": VERIFIER_DEVICE}
+
+    if VERIFIER_QUANTIZATION == "4bit":
+        verifier_load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+    elif VERIFIER_QUANTIZATION == "8bit":
+        verifier_load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
 
     verifier_model = VerifierModelClass.from_pretrained(
         _verifier_model_id,
-        torch_dtype=torch.bfloat16,
-        device_map={"": "cuda:0"},
-        cache_dir=CACHE_DIR,
-        ignore_mismatched_sizes=True,
+        cache_dir=VERIFIER_CACHE,
+        **verifier_load_kwargs,
     )
+    verifier_model.eval()
 else:
     print("3. Skipping Verifier model (not needed for this pipeline)")
     verifier_model = verifier_processor = None
@@ -707,7 +825,6 @@ _DEFAULT_OUTPUT = {
 }
 DEBUG_LOG_PATH = os.path.join(PROJECT_DIR, "logs/experiments_debug.log")
 
-
 def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
     """
     Run the CaVe-VLM-CoT pipeline with verification and retry loop.
@@ -716,18 +833,23 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
     - If VERIFIED: Done
     - If REJECTED: Retry extractor with feedback (up to 3 attempts)
     """
-
     pid = input.get("pid", "unknown")
-    try:
-        # Parse JSON strings back to Python objects
+    
+    def _run(state):
+        torch.cuda.empty_cache()
+        gc.collect()
+        result = cave_vlm_cot_app.invoke(state)
+        torch.cuda.empty_cache()
+        gc.collect()
+        return result
+
+    def _build_state():
         choices = safe_parse_json(input.get("choices"), default=[])
         image_paths = safe_parse_json(input.get("image_paths"), default=[])
         img_captions = safe_parse_json(input.get("img_captions"), default={})
         img_ocr_data = safe_parse_json(input.get("img_ocr"), default={})
-
-        # answer index lives in `input`, not in `expected`
         answer_index = int(input.get("answer", 0))
-        state = State(
+        return State(
             pid=input["pid"],
             question=input["question"],
             hint=input.get("hint", ""),
@@ -742,33 +864,35 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
             topic=input.get("topic", ""),
             skill=input.get("skill", ""),
             category=input.get("category", ""),
-        )
+        ), choices
 
-        print(f"Processing PID {state.pid}")
+    try:
+        print(f"Processing PID {pid}")
+        state, choices = _build_state()
         print(f"Question: {state.question[:80]}...")
 
-        # Clear cache before running
-        torch.cuda.empty_cache()
-        gc.collect()
+        try:
+            result_state = _run(state)
+        except RuntimeError as oom:
+            if "CUDA out of memory" not in str(oom):
+                raise
+            # OOM on attempt 1 — clear aggressively and retry once
+            print(f"  [OOM attempt 1] PID {pid} — clearing memory, retrying...")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            time.sleep(15)
+            # Retry — same graph, just cleaner memory state
+            result_state = _run(state)
+            print(f"  [OOM retry succeeded] PID {pid}")
 
-        # Run the compiled graph - it handles all retries automatically!
-        result_state = cave_vlm_cot_app.invoke(state)
-
-        # Clear cache after running
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        # LangGraph may return state as dict; ensure we have a State object for evaluations
         if isinstance(result_state, dict):
             result_state = State(**result_state)
 
-        # Compute retrieval metrics (using final attempt's retrieval results)
         recall_result = recall_at_k(result_state, k=2)
         print(f"Final recall: {recall_result['recall']:.2%}")
-        
-        # Compute CaVeScore once and reuse in verifier quality to avoid double NLI
-        cave_score = compute_cave_score(result_state)
 
+        cave_score = compute_cave_score(result_state)
         verifier_quality = evaluate_verifier_quality(result_state, cave_result=cave_score)
 
         print(
@@ -776,14 +900,12 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
             f"| Retries: {result_state.retry_count}"
         )
 
-        # Return comprehensive results
         return {
             "pid": result_state.pid,
-            "choices": choices,  # For answer mapping in evaluator
-            "subqueries": result_state.subqueries,  # Final queries
-            "retrieved_chunks": result_state.retrieved_chunks,  # Final retrieval
+            "choices": choices,
+            "subqueries": result_state.subqueries,
+            "retrieved_chunks": result_state.retrieved_chunks,
             "verified_answer": result_state.verifier_answer,
-            # Retrieval metrics
             "planner_hit": planner_hit_rate(result_state, k=2),
             "planner_coverage": planner_coverage_score(result_state),
             "planner_specificity": planner_specificity_score(result_state),
@@ -791,15 +913,12 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
             "precision_at_2": precision_at_k(result_state, k=2),
             "mrr": mean_reciprocal_rank(result_state),
             "ndcg_at_2": ndcg_at_k(result_state, k=2),
-            # Question Image citation metrics (NEW - replacing ROI metrics)
             "qi_citation_coverage": cave_score["qi_citation_coverage"],
             "qi_citation_count": cave_score["qi_citation_count"],
             "qi_citation_precision": cave_score["qi_citation_precision"],
             "num_question_images": cave_score["num_question_images"],
-            # Solver
             "cave_score": cave_score["cave_score"],
             "text_citation_precision": cave_score["text_citation_precision"],
-            # "roi_citation_precision": cave_score["roi_citation_precision"],
             "accuracy": cave_score["accuracy"],
             "ais": cave_score["ais"],
             "hallucination_rate": cave_score["hallucination_rate"],
@@ -807,7 +926,6 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
             "citation_recall": cave_score["citation_recall"],
             "grounding_score": cave_score["grounding_score"],
             "is_grounded": cave_score["is_grounded"],
-            # Verifier metrics
             "verdict": verifier_quality["verdict"],
             "confidence": verifier_quality["confidence"],
             "decision_correct": verifier_quality["decision_correct"],
@@ -817,29 +935,33 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
         }
 
     except Exception as e:
-        print(f"Error processing example {input.get('pid', 'unknown')}: {e}")
+        # Reaches here only if: non-OOM error, OR OOM retry also failed
+        is_oom = "CUDA out of memory" in str(e)
+        if is_oom:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            print(f"  [OOM both attempts failed] PID {pid} — returning default")
+        else:
+            print(f"Error processing example {pid}: {e}")
+
         tb_str = traceback.format_exc()
         traceback.print_exc()
 
-        # Write to local debug log
         try:
             os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
             with open(DEBUG_LOG_PATH, "a") as f:
-                f.write(
-                    json.dumps({
-                        "timestamp": int(time.time() * 1000),
-                        "location": "experiments.py:cave_vlm_cot_with_verifier_task",
-                        "pid": pid,
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                        "traceback": tb_str,
-                    }) + "\n"
-                )
+                f.write(json.dumps({
+                    "timestamp": int(time.time() * 1000),
+                    "location": "experiments.py:cave_vlm_cot_with_verifier_task",
+                    "pid": pid,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                    "traceback": tb_str,
+                }) + "\n")
         except Exception:
-            pass # Don't let logging failure mask the original error
-        
-        # Attach the error to the active Phoenix span so it's visible in the
-        # observability dashboard, not just the local log file.
+            pass
+
         try:
             span = otel_trace.get_current_span()
             if span and span.is_recording():
@@ -849,7 +971,6 @@ def cave_vlm_cot_with_verifier_task(input: dict, expected: dict) -> dict:
         except Exception:
             pass
 
-        # Return default values instead of None
         return {**_DEFAULT_OUTPUT, "pid": pid}
 
 print("Task function defined: cave_vlm_cot_with_verifier_task")
@@ -899,10 +1020,13 @@ experiment_with_verifier = experiments_client.experiments.run_experiment(
     evaluators=ALL_EVALUATORS,
     experiment_name=(
         f"CaVe-VLM-CoT-{DATASET_NAME}-{PIPELINE_MODE}-{MODEL_VARIANT}"
+        f"-n{MAX_SAMPLES or 'all'}-seed{SAMPLE_SEED}"
         f"-shard{SHARD_INDEX}-of-{NUM_SHARDS}"
     ),
     experiment_description=(
         f"Pipeline: {PIPELINE_MODE} | Models: {MODEL_VARIANT} | "
+        f"Dataset cap: {MAX_SAMPLES or 'all'} | Sample seed: {SAMPLE_SEED} | "
+        f"Verifier: {VERIFIER_MODEL_ID} ({VERIFIER_QUANTIZATION}) | "
         f"Shard {SHARD_INDEX+1}/{NUM_SHARDS}"
     ),
 )

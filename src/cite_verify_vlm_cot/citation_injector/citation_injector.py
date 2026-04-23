@@ -584,7 +584,7 @@ def inject_citations(state: State, encoder=None) -> State:
         r'<(?:OBSERVATIONS|CAPTION)>', reasoning, re.IGNORECASE
     ))
     text_is_substantive = any(
-        len(chunk.strip()) > 150
+        len(chunk.strip()) > 50
         for ci in (state.retrieved_chunks or {}).values()
         for chunk in (ci.text_chunks if hasattr(ci, 'text_chunks') else ci.get('text_chunks', []))[:3]
         if not chunk.strip().lower().startswith(

@@ -63,15 +63,21 @@ def text_to_embedding(text):
     embedding = text_model.encode(text, batch_size=1, normalize_embeddings=True)
     return embedding
 
-@functools.lru_cache(maxsize=4096)
+@functools.lru_cache(maxsize=131072)
 def _web_search_cached(query: str, k: int) -> tuple:
     """
     Cached inner implementation of web_search.
-    ScienceQA has heavy query overlap across 5,000 rows — the same
+    ScienceQA has heavy query overlap across 21,000 rows — the same
     "latitude of X", "definition of Y", "Punnett square Z" queries appear
     dozens of times.  An LRU cache keyed on (query, k) eliminates redundant
     DDG round-trips (~2-5s each) and reduces rate-limit pressure.
-    maxsize=4096 covers ~1 query per row of a 5,000-row dataset with headroom.
+    maxsize=131072 (128k): Qwen2.5 generates 7-8 subqueries per question;
+    across 21,000 questions that is up to ~168,000 unique queries. 128k covers
+    the vast majority given the overlap between questions on the same topic.
+    (Previous value of 4096 was sized for the 5k pilot run and caused cache
+    thrashing on the full 21k dataset, re-issuing DDG calls for queries already
+    seen earlier in the same run.)
+
     Returns a tuple (hashable) so lru_cache can store it.
     """
 

@@ -126,7 +126,7 @@ def build_text_index(csv_path: str = None, index_dir: str = None):
         )
 
     df = pd.read_csv(csv_path)
-    # df = df.iloc[:10]
+    # df = df.iloc[:5]
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     
     data = pd.DataFrame()
