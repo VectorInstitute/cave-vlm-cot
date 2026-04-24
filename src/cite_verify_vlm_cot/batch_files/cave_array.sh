@@ -27,13 +27,13 @@
 #   tail -f /projects/cave-vlm-cot/logs/cave_<jobid>_<taskid>.out
 
 #SBATCH --job-name=cave-vlm-cot
-#SBATCH --array=0-119                 # 3 experiments × 20 shards over 5k ScienceQA
+#SBATCH --array=0-79                 # 3 experiments × 20 shards over 5k ScienceQA
 #SBATCH --nodes=1                     # each task runs on its own node
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12            # DDG web search uses ThreadPoolExecutor
-#SBATCH --gres=gpu:a40:3          # 3 GPUs per task (planner/solver/verifier)
+#SBATCH --gres=gpu:a40:2          # 3 GPUs per task (planner/solver/verifier)
 #SBATCH --mem=120G
-#SBATCH --time=0-12:00:00             # each shard is 1/20 of the capped 5k dataset
+#SBATCH --time=0-02:00:00             # each shard is 1/20 of the capped 5k dataset
 #SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
 #SBATCH --output=/projects/cave-vlm-cot/logs/cave_%j_%a.out
 #SBATCH --error=/projects/cave-vlm-cot/logs/cave_%j_%a.err
