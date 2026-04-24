@@ -1,6 +1,11 @@
 # CaVe-VLM-CoT: An Interpretable Vision-Language Model Framework
 
-A five-stage agentic-RAG pipeline for grounded multimodal reasoning on science QA. Every answer is backed by cited evidence and verified by a second VLM before being returned — with an automatic feedback loop that retries retrieval when hallucinations are detected.
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"/></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"/></a>
+</p>
+
+A five-stage agentic-RAG pipeline for grounded multimodal reasoning on science QA. Every answer is backed by cited evidence and verified by a second VLM before being returned, with an automatic feedback loop that retries retrieval when hallucinations are detected.
 
 ---
 
@@ -37,9 +42,13 @@ cd cave-vlm-cot/src/cite_verify_vlm_cot
 module purge
 module load StdEnv/2023 gcc/12.3 cuda/12.6 arrow python/3.11 scipy-stack faiss/1.12.0
 
+# Create virtual environment
+python3.11 -m venv .venv
+
 # Activate virtual environment
-source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
-export PYTHONPATH=/projects/cave-vlm-cot/env/lib/python3.11/site-packages:$PYTHONPATH
+source .venv/bin/activate
+pip install -r requirements.txt
+export PYTHONPATH=/projects/cave-vlm-cot/.venv/lib/python3.11/site-packages:$PYTHONPATH
 
 ```
 
@@ -228,40 +237,6 @@ python aggregate_shards.py 'outputs/mmmu-shard*.csv'             --save-csv outp
 | Feedback Quality          | 0.000       | **0.274**      |
 | Confidence Appropriateness| 0.131       | **0.494**      |
 | Accuracy gain over RS     | +4.3 pp     | **+19.2 pp**   |
-
----
-
-## Pipeline components
-
-### 1. Extractor (`extractor/planner.py`)
-
-Converts a raw MCQ into up to 8 search queries using **Qwen2.5-7B-Instruct** (4-bit via Unsloth). The few-shot prompt ends with `[` to prime the model into producing a structured list. Query quality is enforced by structural validation (`_is_valid_query`) and three-tier parse fallback. On retry, verifier feedback and a list of failed queries are injected into the prompt.
-
-**Guardrails:** structural query validation · 3-way parse fallback · deterministic choice-discriminating queries · keyword-only fallback when LLM output is unparseable · max 8 queries
-
-### 2. Retriever (`retriever/retriever.py`)
-
-Per subquery: hybrid local retrieval (dense FAISS + BM25 + RRF fusion), followed by parallel DuckDuckGo web search with choice-augmented variants, then cross-encoder reranking.
-
-**Guardrails:** LRU cache (4,096 entries) on web search · exponential DDG backoff (1 s → 2 s → 4 s) · 0.3 s stagger between parallel DDG submissions · doubled web budget for natural science questions · local docs admitted only when cross-encoder score > 0
-
-### 3. Solver (`solver/solver.py`)
-
-**Llama-3.2V-11B-CoT** (NF4 quantised) generates a structured chain-of-thought with mandatory citation anchors. Two prompt templates: text-only (`SUMMARY → REASONING → CONCLUSION`) and image-present (`OBSERVATIONS → REASONING → CONCLUSION`). A cross-encoder consistency check corrects the stated answer letter if reasoning supports a different choice by a margin > 0.5.
-
-**Guardrails:** structured XML tags enforce output format · mandatory `[Text Evidence N]` and `[Question Image N]` citations · cross-encoder consistency check on conclusion · multi-pattern answer extraction with tail fallback · max 5 question images
-
-### 4. Citation Injector (`solver/citation_injector.py`)
-
-Post-hoc grounding step between solver and verifier. Splits reasoning into claims and uses the cross-encoder (`ms-marco-MiniLM-L-6-v2`) to match each uncited claim to the best evidence chunk (threshold 0.4). Handles domain-knowledge steps by running targeted web search for `"From domain knowledge, <claim>"` sentences.
-
-**Guardrails:** DK enrichment gated on KB coverage (< 2 substantive chunks) · DK lookups capped at 3 per question · min claim length 20 chars · skips if > 50% already cited (unless conclusion is uncited) · observation-block claims skip text matching (image-only evidence)
-
-### 5. Verifier (`verifier/verifier.py`)
-
-**Qwen2.5-VL-32B-Instruct** (4-bit NF4) runs a structured hallucination check: for each cited claim it verifies whether the referenced evidence actually supports the stated fact, checks citation indices are in range, and flags image description contradictions. Shares the same evidence list as the solver (via `_build_text_chunk_list`) so citation numbers are never misaligned.
-
-**Guardrails:** INCONCLUSIVE-REJECT downgraded to VERIFIED/LOW · VERIFIED-INCONCLUSIVE recovers solver letter · UNKNOWN verdict fallback · max 4 images · max 3 retry attempts
 
 ---
 
