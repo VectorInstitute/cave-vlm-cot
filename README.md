@@ -354,6 +354,7 @@ cave-vlm-cot/
     └── batch_files/
         ├── cave_array.sh           # SLURM array job — ScienceQA ablations (120 tasks)
         └── cave_mmmu_array.sh      # SLURM array job — MMMU full pipeline (20 tasks)
+        └── preparation.sh          # SLURM job — ScienceQA dataset preparation
 ```
 ---
 ## Citation
