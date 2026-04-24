@@ -316,7 +316,8 @@ CaVeScore rankings are validated under 7 alternative weight configurations (n = 
 | grounding_heavy | 0.30 | 0.15 | 0.15 | 0.15 | 0.25 | 0.263 | 0.356 | 0.489 | +0.227 |
 | recall_skewed | 0.35 | 0.10 | 0.35 | 0.10 | 0.10 | 0.278 | 0.362 | 0.504 | +0.226 |
 
-No re-inference required — pure arithmetic re-weighting of pre-computed components.No re-inference required — pure arithmetic re-weighting of pre-computed components. The ordering Solver-Only < Retriever-Solver < CaVe-VLM-CoT is preserved under every configuration.
+No re-inference required — pure arithmetic re-weighting of pre-computed components. The ordering Solver-Only < Retriever-Solver < CaVe-VLM-CoT is preserved under every configuration.
+
 ---
 
 ## Observability
