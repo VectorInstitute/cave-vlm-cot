@@ -5,7 +5,7 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"/></a>
 </p>
 
-A five-stage agentic-RAG pipeline for grounded multimodal reasoning on science QA. Every answer is backed by cited evidence and verified by a second VLM before being returned — with an automatic feedback loop that retries retrieval when hallucinations are detected.
+A five-stage agentic-RAG pipeline for grounded multimodal reasoning on science QA. Every answer is backed by cited evidence and verified by a second VLM before being returned, with an automatic feedback loop that retries retrieval when hallucinations are detected.
 
 ---
 
@@ -43,8 +43,8 @@ module purge
 module load StdEnv/2023 gcc/12.3 cuda/12.6 arrow python/3.11 scipy-stack faiss/1.12.0
 
 # Activate virtual environment
-source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
-export PYTHONPATH=/projects/cave-vlm-cot/env/lib/python3.11/site-packages:$PYTHONPATH
+source .venv/bin/activate
+export PYTHONPATH=/projects/cave-vlm-cot/.venv/lib/python3.11/site-packages:$PYTHONPATH
 
 ```
 
