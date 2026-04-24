@@ -270,6 +270,7 @@ Post-hoc grounding step between solver and verifier. Splits reasoning into claim
 All 26 evaluators are defined in `evaluations.py` and logged to Arize Phoenix per question.
 
 | Metric | Description |
+|--------|-------------|
 | `accuracy` | Final answer matches gold label |
 | `cave_score` | Composite: `0.4×acc + 0.2×cite_prec + 0.2×cite_rec + 0.1×AIS + 0.1×grounding` |
 | `citation_precision` | NLI check: does cited evidence entail the claim? |
