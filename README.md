@@ -307,6 +307,7 @@ For solver-only runs, the solver loads on `cuda:0` and only 1 GPU is needed.
 CaVeScore rankings are validated under 7 alternative weight configurations (n = 1,000 ScienceQA):
 
 | Config | w_acc | w_cprec | w_crec | w_ais | w_gnd | Solver-Only | Retriever-Solver | CaVe-VLM-CoT | Gap |
+|--------|-------|---------|--------|-------|-------|-------------|------------------|--------------|-----|
 | default | 0.40 | 0.20 | 0.20 | 0.10 | 0.10 | 0.314 | 0.404 | 0.566 | +0.251 |
 | accuracy_heavy | 0.60 | 0.10 | 0.10 | 0.10 | 0.10 | 0.460 | 0.508 | 0.661 | +0.201 |
 | citation_heavy | 0.20 | 0.30 | 0.30 | 0.10 | 0.10 | 0.168 | 0.300 | 0.470 | +0.302 |
