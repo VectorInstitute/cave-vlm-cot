@@ -16,6 +16,9 @@
 | **high**      | 2000     | Higher priority than normal                                                                            |
 | **benchmark** | 2000     | **BUT limited**: Max 1 GPU per job, Max walltime **1 day** (1-00:00:00), and cluster-level constraints |
 
+ls /projects/cave-vlm-cot/hf_cache/hub/models--Qwen--Qwen2.5-VL-72B-Instruct/snapshots/
+ls /projects/cave-vlm-cot/hf_cache/hub/ | grep Qwen2.5-VL
+
 # List recent logs
 ls -lt /projects/cave-vlm-cot/logs/ | head -20
 rm -rf /projects/cave-vlm-cot/logs/
