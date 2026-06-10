@@ -34,7 +34,7 @@
 #SBATCH --gres=gpu:a40:2          # 3 GPUs per task (planner/solver/verifier)
 #SBATCH --mem=120G
 #SBATCH --time=0-02:00:00             # each shard is 1/20 of the capped 5k dataset
-#SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
+#SBATCH --chdir=${CAVE_WORKDIR}/src/cite_verify_vlm_cot
 #SBATCH --output=/projects/cave-vlm-cot/logs/cave_%j_%a.out
 #SBATCH --error=/projects/cave-vlm-cot/logs/cave_%j_%a.err
 
@@ -51,7 +51,7 @@ mkdir -p /projects/cave-vlm-cot/logs
 PROJECT_DIR=/projects/cave-vlm-cot
 
 # Paths
-WORKDIR=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
+WORKDIR=${CAVE_WORKDIR}/src/cite_verify_vlm_cot
 LOGDIR=${PROJECT_DIR}/logs
 OUTDIR=${PROJECT_DIR}/outputs
 mkdir -p "${LOGDIR}" "${OUTDIR}" "${PROJECT_DIR}/hf_cache" "${PROJECT_DIR}/indexes"
@@ -109,7 +109,7 @@ module load faiss/1.12.0
 export PYTHONPATH="${PROJECT_DIR}/env/lib/python3.11/site-packages:$PYTHONPATH"
 # Python comes from the virtualenv below — no separate python module needed
 
-source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
+source "${CAVE_WORKDIR}/env/bin/activate"
 
 # Huggingface / PyTorch environment — all caches on project storage
 export CAVE_PROJECT_DIR=/projects/cave-vlm-cot

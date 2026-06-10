@@ -4,18 +4,20 @@ utils.py
 Pydantic state models, shared utilities, and FAISS index construction
 for the CaVe-VLM-CoT retrieval pipeline.
 """
+
 import ast
 import gc
 import json
 import math
 import os
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import faiss
 import numpy as np
 import pandas as pd
 import torch
 from pydantic import BaseModel
+
 
 # Ordered list of text fields used to build a document's text representation.
 TEXT_FIELD_ORDER = ["subject", "topic", "category", "skill", "lecture", "hint", "solution"]
@@ -26,20 +28,23 @@ TEXT_FIELD_ORDER = ["subject", "topic", "category", "skill", "lecture", "hint", 
 #   model.get(...)  → AttributeError
 #   model.field     → Correct
 
+
 # Define RoiInfo with all fields used in retriever
 class RoiInfo(BaseModel):
     roi_id: str
-    bbox: List[int]  
-    source_image: str  
-    image_patch: str = "" # empty when patch is stored in State.image_patch_cache
+    bbox: List[int]
+    source_image: str
+    image_patch: str = ""  # empty when patch is stored in State.image_patch_cache
     caption: str
     score: float
-    subject: str = "" 
+    subject: str = ""
     topic: str = ""
+
 
 class ChunkInfo(BaseModel):
     text_chunks: List[str] = []
     image_rois: List[RoiInfo] = []
+
 
 class State(BaseModel):
     pid: str
@@ -85,11 +90,13 @@ class State(BaseModel):
     retry_count: int = 0  # Track number of retries
     attempt_history: List[Dict] = []
 
+
 # Helpers
 def safe_str(x):
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return ""
     return str(x).strip()
+
 
 def safe_parse_json(x, default=None):
     """Safely parse JSON or Python literal string."""
@@ -107,6 +114,7 @@ def safe_parse_json(x, default=None):
         except (ValueError, SyntaxError):
             return default if default is not None else {}
 
+
 def build_text_index(csv_path: str = None, index_dir: str = None):
     """
     Build the text FAISS index from the ScienceQA KB.
@@ -121,14 +129,13 @@ def build_text_index(csv_path: str = None, index_dir: str = None):
 
     if csv_path is None:
         csv_path = os.path.join(
-            os.path.expanduser("~"),
-            "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"
+            os.path.expanduser("~"), "cave-vlm-cot/src/cite_verify_vlm_cot/outputs/scienceqa_augmented.csv"
         )
 
     df = pd.read_csv(csv_path)
     # df = df.iloc[:5]
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-    
+
     data = pd.DataFrame()
 
     for idx, row in df.iterrows():
@@ -163,9 +170,7 @@ def build_text_index(csv_path: str = None, index_dir: str = None):
     # because it expects "multimodal_embeddings.csv" to exist alongside the FAISS indexes.
     # Embeddings are stored as JSON strings since raw float lists aren't CSV-native.
     data_to_save = data.copy()
-    data_to_save["embeddings"] = data_to_save["embeddings"].apply(
-        lambda e: json.dumps(e) if isinstance(e, list) else e
-    )
+    data_to_save["embeddings"] = data_to_save["embeddings"].apply(lambda e: json.dumps(e) if isinstance(e, list) else e)
     data_to_save.to_csv(os.path.join(_out_dir, "multimodal_embeddings.csv"), index=False)
     print(f"Saved multimodal_embeddings.csv ({len(data_to_save)} rows)")
 
@@ -180,7 +185,7 @@ def build_text_index(csv_path: str = None, index_dir: str = None):
         faiss.write_index(text_index, os.path.join(_out_dir, "text_index.faiss"))
         print(f"Text index: {len(text_data)} entries")
 
-    print(f"\nINDEX SUMMARY:")
+    print("\nINDEX SUMMARY:")
     print(f"  Text entries: {len(text_data)}")
 
     return data

@@ -45,12 +45,11 @@ from pathlib import Path
 
 import pandas as pd
 
+
 # CLI
 parser = argparse.ArgumentParser(description="Aggregate CaVe-VLM-CoT shard CSVs")
-parser.add_argument("csvs", nargs="+",
-                    help="One or more Phoenix experiment CSV export files (supports globs)")
-parser.add_argument("--save-csv", default=None,
-                    help="Save the combined per-row DataFrame to this path")
+parser.add_argument("csvs", nargs="+", help="One or more Phoenix experiment CSV export files (supports globs)")
+parser.add_argument("--save-csv", default=None, help="Save the combined per-row DataFrame to this path")
 args = parser.parse_args()
 
 # Expand any globs (needed on Windows; Linux shells expand automatically)
@@ -79,16 +78,14 @@ print(f"\nCombined: {len(combined)} rows from {len(dfs)} file(s)\n")
 if "example_id" in combined.columns:
     dupes = combined["example_id"].duplicated().sum()
     if dupes:
-        print(f"[WARN] {dupes} duplicate example_ids detected — "
-              f"rows may overlap across shards. Dropping duplicates.\n")
+        print(f"[WARN] {dupes} duplicate example_ids detected — rows may overlap across shards. Dropping duplicates.\n")
         combined = combined.drop_duplicates(subset="example_id", keep="first")
         print(f"After dedup: {len(combined)} rows\n")
 
 
 # Identify score columns
 # Phoenix naming: annotation_{evaluator_name}_score
-score_cols = [c for c in combined.columns
-              if c.startswith("annotation_") and c.endswith("_score")]
+score_cols = [c for c in combined.columns if c.startswith("annotation_") and c.endswith("_score")]
 
 if not score_cols:
     sys.exit(
@@ -96,13 +93,14 @@ if not score_cols:
         "Make sure you exported the full CSV from Phoenix (not just the summary)."
     )
 
+
 # Map column to clean display name
 # annotation_eval_accuracy_score    -> eval_accuracy
 # annotation_eval_cave_score_score  -> eval_cave_score  (strip one _score suffix)
 def col_to_name(col):
-    name = col[len("annotation_"):]   # strip annotation_ prefix
+    name = col[len("annotation_") :]  # strip annotation_ prefix
     if name.endswith("_score"):
-        name = name[:-len("_score")]  # strip trailing _score
+        name = name[: -len("_score")]  # strip trailing _score
     return name
 
 

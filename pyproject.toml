@@ -1,27 +1,218 @@
 [project]
-name = "aieng-template-uv"
+name = "cave-vlm-cot"
 version = "0.1.0"
-description = "Add your description here"
+description = "CaVe-VLM-CoT: Citation-aware Verification for Vision-Language Model Chain-of-Thought"
 readme = "README.md"
-authors = [ {name = "Vector AI Engineering", email = "ai_engineering@vectorinstitute.ai"}]
+authors = [{name = "Vector AI Engineering", email = "ai_engineering@vectorinstitute.ai"}]
 license = "Apache-2.0"
-repository = "https://github.com/VectorInstitute/aieng-template-uv"
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.12"
 dependencies = [
+    "accelerate==1.13.0",
+    "aiohappyeyeballs==2.6.1",
+    "aiohttp==3.13.3",
+    "aioitertools==0.13.0",
+    "aiosignal==1.4.0",
+    "aiosqlite==0.22.1",
+    "alembic==1.18.4",
+    "annotated-doc==0.0.4",
+    "annotated-types==0.7.0",
+    "anyio==4.13.0",
+    "arize-phoenix-client==2.3.0",
+    "arize-phoenix-evals==2.13.0",
+    "arize-phoenix-otel==0.15.0",
+    "attrs==26.1.0",
+    "Authlib==1.6.9",
+    "av==15.1.0",
+    "bitsandbytes==0.49.2",
+    "cachetools==7.0.5",
+    "certifi==2026.2.25",
+    "cffi==2.0.0",
+    "charset-normalizer==3.4.7",
+    "click==8.3.2",
+    "cross-web==0.4.1",
+    "cryptography==46.0.3",
+    "cut-cross-entropy==25.1.1",
+    "Cython==0.29.37",
+    "dataclasses-json==0.6.7",
+    "datasets==4.3.0",
+    "diffusers==0.37.1",
+    "dill==0.3.8",
+    "distro==1.9.0",
+    "dnspython==2.8.0",
+    "docstring-parser==0.17.0",
+    "duckduckgo-search==8.1.1",
+    "email-validator==2.3.0",
+    "fastapi==0.135.3",
     "filelock==3.25.2",
+    "frozenlist==1.8.0",
+    "fsspec==2025.3.0",
+    "googleapis-common-protos==1.74.0",
+    "graphql-core==3.2.8",
+    "greenlet==3.3.1",
+    "grpc-interceptor==0.15.4",
+    "grpcio==1.76.0",
+    "h11==0.16.0",
+    "hdbscan==0.8.37",
+    "hf-transfer==0.1.9",
+    "hf-xet==1.4.3",
+    "httpcore==1.0.9",
+    "httpx==0.28.1",
+    "huggingface-hub==1.9.0",
+    "idna==3.11",
+    "importlib-metadata==8.7.1",
+    "jinja2==3.1.6",
+    "jiter==0.13.0",
+    "jmespath==1.1.0",
+    "joblib==1.5.3",
+    "jsonpatch==1.33",
+    "jsonpath-ng==1.8.0",
+    "jsonpointer==3.1.1",
+    "jsonschema==4.26.0",
+    "jsonschema-specifications==2025.9.1",
+    "langchain-core==1.2.26",
+    "langgraph==1.1.6",
+    "langgraph-checkpoint==4.0.1",
+    "langgraph-prebuilt==1.0.9",
+    "langgraph-sdk==0.3.12",
+    "langsmith==0.7.25",
+    "ldap3==2.9.1",
+    "lia-web==0.3.1",
+    "llvmlite==0.46.0",
+    "lxml==6.0.2",
+    "Mako==1.3.10",
+    "markdown-it-py==4.0.0",
+    "markupsafe==3.0.3",
+    "marshmallow==3.26.2",
+    "mdurl==0.1.2",
+    "mpmath==1.3.0",
+    "msgspec==0.19.0",
+    "multidict==6.7.1",
+    "multiprocess==0.70.16",
+    "mypy-extensions==1.1.0",
+    "networkx==3.6.1",
+    "numba==0.64.0",
+    "numpy==1.26.4",
+    "openai==1.109.1",
+    "openinference-instrumentation==0.1.46",
+    "openinference-instrumentation-langchain==0.1.62",
+    "openinference-instrumentation-llama-index==4.3.9",
+    "openinference-instrumentation-openai==0.1.44",
+    "openinference-semantic-conventions==0.1.28",
+    "opentelemetry-api==1.40.0",
+    "opentelemetry-exporter-otlp==1.40.0",
+    "opentelemetry-exporter-otlp-proto-common==1.40.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.40.0",
+    "opentelemetry-exporter-otlp-proto-http==1.40.0",
+    "opentelemetry-instrumentation==0.61b0",
+    "opentelemetry-proto==1.40.0",
+    "opentelemetry-sdk==1.40.0",
+    "opentelemetry-semantic-conventions==0.61b0",
+    "orjson==3.11.7",
+    "ormsgpack==1.12.1",
+    "packaging==26.0",
+    "pandas==3.0.0",
+    "peft==0.18.1",
+    "pillow==12.1.0",
+    "primp==0.15.0",
+    "prometheus-client==0.24.1",
+    "propcache==0.4.1",
+    "protobuf==5.29.6",
+    "psutil==7.2.2",
+    "pyasn1==0.6.3",
+    "pycparser==3.0",
+    "pydantic==2.12.5",
+    "pydantic-core==2.41.5",
+    "pynndescent==0.6.0",
+    "pystache==0.6.8",
+    "pytesseract==0.3.13",
+    "python-dateutil==2.9.0.post0",
+    "python-dotenv==1.2.2",
+    "python-multipart==0.0.22",
+    "pyyaml==6.0.3",
+    "qwen-vl-utils==0.0.14",
+    "rank-bm25==0.2.2",
+    "referencing==0.37.0",
+    "regex==2026.1.15",
+    "requests==2.33.1",
+    "requests-toolbelt==1.0.0",
+    "rich==14.3.3",
+    "rpds-py==0.30.0",
+    "safetensors==0.7.0",
+    "scikit-learn==1.8.0",
+    "scipy==1.17.0",
+    "sentence-transformers==5.3.0",
+    "sentencepiece==0.2.0",
+    "shellingham==1.5.4",
+    "six==1.17.0",
+    "sniffio==1.3.1",
+    "sortedcontainers==2.4.0",
+    "SQLAlchemy==2.0.49",
+    "sqlean.py==0.1",
+    "starlette==1.0.0",
+    "strawberry-graphql==0.208.2",
+    "sympy==1.14.0",
+    "tenacity==8.5.0",
+    "tesseract==0.1.3",
+    "threadpoolctl==3.6.0",
+    "tiktoken==0.12.0",
+    "tokenizers==0.22.2",
+    "torch==2.9.0",
+    "torchao==0.17.0",
+    "tqdm==4.67.3",
+    "transformers==5.5.0",
+    "trl==0.24.0",
+    "typeguard==4.5.1",
+    "typer==0.24.1",
+    "typing-extensions==4.15.0",
+    "typing-inspect==0.9.0",
+    "typing-inspection==0.4.2",
+    "tyro==1.0.12",
+    "umap-learn==0.5.11",
+    "unsloth==2026.4.2",
+    "unsloth-zoo==2026.4.2",
     "urllib3==2.6.3",
+    "uuid-utils==0.13.0",
+    "uvicorn==0.43.0",
+    "wrapt==1.17.3",
+    "xxhash==3.5.0",
+    "yarl==1.23.0",
+    "zipp==3.23.0",
+    "zstandard==0.25.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/VectorInstitute/cave-vlm-cot"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# torch / triton / xformers must come from the PyTorch CUDA 12.6 index.
+# Plain PyPI only has CPU builds. faiss is loaded as an HPC module (faiss/1.12.0)
+# and is intentionally absent from pip deps.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch    = { index = "pytorch-cu126" }
+triton   = { index = "pytorch-cu126" }
+xformers = { index = "pytorch-cu126" }
+
+[tool.uv]
+# Empty by default so `uv sync` only installs runtime deps.
+# Use `uv sync --group dev` or `--group docs` explicitly when needed.
+default-groups = []
 
 [dependency-groups]
 dev = [
     "codecov>=2.1.13",
     "mypy>=1.14.1",
     "nbqa>=1.9.1",
-    "pip>=26.0", # Pinning version to address vulnerability CVE-2026-1703
+    "pip>=26.0",                # CVE-2026-1703
     "pip-audit>=2.7.3",
     "pre-commit>=4.1.0",
     "pytest>=8.3.4",
@@ -31,7 +222,7 @@ dev = [
     "ruff>=0.13.3",
 ]
 docs = [
-    "jinja2>=3.1.6", # Pinning version to address vulnerability GHSA-cpwx-vrp4-4pq7
+    # jinja2 is already pinned in main deps; listed here for explicitness only
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.5.15",
     "mkdocstrings>=0.24.1",
@@ -39,10 +230,6 @@ docs = [
     "ipykernel>=6.29.5",
     "ipython>=8.31.0",
 ]
-
-# Default dependency groups to be installed
-[tool.uv]
-default-groups = ["dev", "docs"]
 
 [tool.mypy]
 follow_imports = "normal"
@@ -79,45 +266,30 @@ docstring-code-format = true
 
 [tool.ruff.lint]
 select = [
-    "A", # flake8-builtins
-    "B", # flake8-bugbear
-    "COM", # flake8-commas
-    "C4", # flake8-comprehensions
-    "RET", # flake8-return
-    "SIM", # flake8-simplify
-    "ICN", # flake8-import-conventions
-    "Q", # flake8-quotes
-    "RSE", # flake8-raise
-    "D", # pydocstyle
-    "E", # pycodestyle
-    "F", # pyflakes
-    "I", # isort
-    "W", # pycodestyle
-    "N", # pep8-naming
-    "ERA", # eradicate
-    "PL", # pylint
+    "A", "B", "COM", "C4", "RET", "SIM", "ICN", "Q", "RSE",
+    "D", "E", "F", "I", "W", "N", "ERA", "PL",
 ]
-fixable = ["A", "B", "COM", "C4", "RET", "SIM", "ICN", "Q", "RSE", "D", "E", "F", "I", "W", "N", "ERA", "PL"]
+fixable = [
+    "A", "B", "COM", "C4", "RET", "SIM", "ICN", "Q", "RSE",
+    "D", "E", "F", "I", "W", "N", "ERA", "PL",
+]
 ignore = [
-    "B905", # `zip()` without an explicit `strict=` parameter
-    "E501", # line too long
-    "D203", # 1 blank line required before class docstring
-    "D213", # Multi-line docstring summary should start at the second line
-    "PLR2004", # Replace magic number with named constant
-    "PLR0913", # Too many arguments
-    "COM812", # Missing trailing comma
-    "ERA001", # Found commented-out code (too many false positives with math comments)
-    "A001", # Ignore variable `input` is shadowing a Python builtin (common for torch)
-    "A002", # Ignore variable `input` is shadowing a Python builtin in function (common for torch)
-    "D301", # r-strings for docstrings with backslashes
+    "B905",    # zip() without explicit strict=
+    "E501",    # line too long
+    "D203",    # 1 blank line before class docstring
+    "D213",    # multi-line docstring summary at second line
+    "PLR2004", # magic number
+    "PLR0913", # too many arguments
+    "COM812",  # missing trailing comma
+    "ERA001",  # commented-out code (false positives with math)
+    "A001",    # variable shadows builtin `input`
+    "A002",    # function arg shadows builtin `input`
+    "D301",    # r-strings for docstrings with backslashes
 ]
 
-# Ignore import violations in all `__init__.py` files.
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401", "F403", "F811"]
-# Ignoring undocumented public functions, public init, magic method, and magic numbers in tests folder
-"tests/*" = ["D103", "D105", "D107"]
-
+"tests/*"     = ["D103", "D105", "D107"]
 
 [tool.ruff.lint.pep8-naming]
 ignore-names = ["X*", "setUp"]
@@ -138,5 +310,7 @@ markers = [
 
 [tool.coverage]
     [tool.coverage.run]
-    source=["src/aieng_template_uv"]
-    omit=["tests/*", "*__init__.py"]
+    source = ["src/cite_verify_vlm_cot"]
+    omit   = ["tests/*", "*__init__.py"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/cite_verify_vlm_cot"]

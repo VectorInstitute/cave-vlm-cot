@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:a40:1          # 1 GPU for BLIP captioning
 #SBATCH --mem=64G
 #SBATCH --time=0-08:00:00         # captioning 21k images can take several hours
-#SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
+#SBATCH --chdir=${CAVE_WORKDIR}/src/cite_verify_vlm_cot
 #SBATCH --output=/projects/cave-vlm-cot/logs/data_prep_%j.out
 #SBATCH --error=/projects/cave-vlm-cot/logs/data_prep_%j.err
 
@@ -29,14 +29,14 @@ module load scipy-stack
 
 export PYTHONPATH=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/MPI/gcc12-openmpi4/scipy-stack/2023b/lib/python3.11/site-packages:$PYTHONPATH
 
-source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
+source "${CAVE_WORKDIR}/env/bin/activate"
 
 export CAVE_PROJECT_DIR=/projects/cave-vlm-cot
 export HF_HOME=${CAVE_PROJECT_DIR}/hf_cache
 export TRANSFORMERS_CACHE=${CAVE_PROJECT_DIR}/hf_cache
 export TQDM_DISABLE=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export SCIENCEQA_ROOT=/h/sneharao/scienceqa/
+export SCIENCEQA_ROOT=${SCIENCEQA_ROOT}
 
 echo "Started: $(date)"
 echo "Host: $(hostname)"

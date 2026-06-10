@@ -30,6 +30,9 @@ Each stage is a node in a **LangGraph** state machine. The shared `State` Pydant
 
 ---
 
+Got it — you're a reviewer, not the author. Just insert the uv option before the existing instructions, touch nothing else:
+
+```markdown
 ## Installation
 
 Requires Python 3.11 (via module system) and **three A40 48 GB GPUs** for the full pipeline, or one A40 for solver-only.
@@ -37,20 +40,33 @@ Requires Python 3.11 (via module system) and **three A40 48 GB GPUs** for the fu
 ```bash
 git clone https://github.com/VectorInstitute/cave-vlm-cot.git
 cd cave-vlm-cot/src/cite_verify_vlm_cot
+```
 
+### Option A - uv (recommended)
+```bash
+# From repo root (where pyproject.toml lives)
+cd ..
+pip install uv
+uv sync
+cd src/cite_verify_vlm_cot
+```
+
+### Option B - pip
+```bash
 # Load required modules (Vector Institute HPC)
 module purge
 module load StdEnv/2023 gcc/12.3 cuda/12.6 arrow python/3.11 scipy-stack faiss/1.12.0
-
 # Create virtual environment
 python3.11 -m venv .venv
-
 # Activate virtual environment
 source .venv/bin/activate
 pip install -r requirements.txt
 export PYTHONPATH=/projects/cave-vlm-cot/.venv/lib/python3.11/site-packages:$PYTHONPATH
-
 ```
+```
+
+That's the minimum — original pip block completely untouched under Option B, uv added as Option A above it. The only structural change is wrapping both in headers and backing up one directory for `uv sync`.
+
 
 ### Environment variables
 
@@ -60,7 +76,11 @@ Create a `.env` file in the working directory (`src/cite_verify_vlm_cot/`). The 
 PHOENIX_API_KEY=<your-arize-phoenix-api-key>
 PHOENIX_COLLECTOR_ENDPOINT=https://app.phoenix.arize.com
 HF_HOME=/projects/cave-vlm-cot/hf_cache
+CAVE_PROJECT_DIR=/projects/cave-vlm-cot          # root of the repo clone
+CAVE_WORKDIR=/projects/cave-vlm-cot/src/cite_verify_vlm_cot  # working dir for all scripts
 ```
+`CAVE_PROJECT_DIR` is the repo root (where outputs/, hf_cache/, logs/ live).  
+`CAVE_WORKDIR` is the scripts directory - SLURM jobs `cd` here before running.
 
 The following are set automatically by the SLURM scripts and do not need to appear in `.env`:
 

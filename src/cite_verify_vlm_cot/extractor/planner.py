@@ -6,16 +6,19 @@ of search queries for the retriever.
 Input:  State (question, choices, optional image captions/OCR)
 Output: state.subqueries — up to 8 search query strings
 """
+
 import json
+import re
 from typing import Dict, List, Optional
+
 import torch
 from evaluations import planner_coverage_score, planner_specificity_score
-import re
+from prompts import PLANNER_PROMPT_TEMPLATE
 
 # CLIPProcessor handles image pre-processing like resizing and normalization
 from tracer import tracer
 from utils import State
-from prompts import PLANNER_PROMPT_TEMPLATE
+
 
 # Enable only the safe fallback backend
 torch.backends.cuda.enable_flash_sdp(False)
@@ -25,6 +28,7 @@ torch.backends.cuda.enable_math_sdp(True)
 # PyTorch provides multiple implementations of this, called backends (FlashAttention, SDPA(default), Math)
 # SDPA is fast but allocates large temporary buffers, especially bad for long sequences + big models
 # Prefer FlashAttention (best) if your GPU supports it
+
 
 # JSON parsing + structural validation
 def _is_valid_query(candidate: str, question: str) -> bool:
@@ -56,7 +60,7 @@ def _is_valid_query(candidate: str, question: str) -> bool:
         return False
 
     # Must contain at least one content-bearing alphabetic token
-    if not any(re.search(r'[a-zA-Z]{3,}', w) for w in words):
+    if not any(re.search(r"[a-zA-Z]{3,}", w) for w in words):
         return False
 
     # Must not be a verbatim copy of the question
@@ -106,13 +110,14 @@ def _extract_json_array(raw: str) -> Optional[list]:
     lines = []
     for line in raw.splitlines():
         line = line.strip()
-        line = line.lstrip("[")          # remove the generation-prefix "[" if present
-        line = re.sub(r'^[\d]+[\.\)]\s*', '', line)
-        line = re.sub(r'^[-•*]\s*', '', line)
-        line = line.strip().strip('"\'')
+        line = line.lstrip("[")  # remove the generation-prefix "[" if present
+        line = re.sub(r"^[\d]+[\.\)]\s*", "", line)
+        line = re.sub(r"^[-•*]\s*", "", line)
+        line = line.strip().strip("\"'")
         if line:
             lines.append(line)
     return lines if lines else None
+
 
 def parse_planner_output(raw_output: str, question: str) -> List[str]:
     """
@@ -140,14 +145,61 @@ def parse_planner_output(raw_output: str, question: str) -> List[str]:
 # Choice-discriminating query generator (deterministic, KB-agnostic)
 _STOP_WORDS = {
     # current set
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'what', 'which',
-    'how', 'this', 'that', 'does', 'do', 'will', 'can', 'be', 'been',
-    'of', 'in', 'on', 'at', 'to', 'for', 'and', 'or',
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "what",
+    "which",
+    "how",
+    "this",
+    "that",
+    "does",
+    "do",
+    "will",
+    "can",
+    "be",
+    "been",
+    "of",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "and",
+    "or",
     # additions that actually appear in ScienceQA question stems
-    'has', 'have', 'had', 'not', 'from', 'with', 'would', 'could',
-    'should', 'may', 'when', 'where', 'who', 'why', 'if', 'it',
-    'its', 'they', 'them', 'their', 'most', 'some', 'each',
-    'identify', 'following', 'best', 'describes', 'called',
+    "has",
+    "have",
+    "had",
+    "not",
+    "from",
+    "with",
+    "would",
+    "could",
+    "should",
+    "may",
+    "when",
+    "where",
+    "who",
+    "why",
+    "if",
+    "it",
+    "its",
+    "they",
+    "them",
+    "their",
+    "most",
+    "some",
+    "each",
+    "identify",
+    "following",
+    "best",
+    "describes",
+    "called",
 }
 
 
@@ -158,14 +210,14 @@ def generate_choice_queries(question: str, choices: List[str]) -> List[str]:
     Queries are phrased to match KB documents and web snippets about each
     specific choice, enabling discrimination between options.
     """
-    q_words = [w.lower() for w in re.findall(r'\b[a-zA-Z]{3,}\b', question)]
+    q_words = [w.lower() for w in re.findall(r"\b[a-zA-Z]{3,}\b", question)]
     anchor_words = [w for w in q_words if w not in _STOP_WORDS][:3]
     anchor = " ".join(anchor_words)
 
     queries = []
     for choice in choices:
         choice_str = str(choice).strip()
-        if not choice_str or choice_str.lower() in ('yes', 'no', 'true', 'false'):
+        if not choice_str or choice_str.lower() in ("yes", "no", "true", "false"):
             if anchor:
                 queries.append(f"{anchor} {choice_str}"[:80])
             continue
@@ -177,6 +229,7 @@ def generate_choice_queries(question: str, choices: List[str]) -> List[str]:
             queries.append(" ".join(choice_words[:6])[:80])
 
     return [q for q in queries if _is_valid_query(q, question)]
+
 
 # Retry: extract query directions from hallucination details
 def queries_from_hallucination_feedback(
@@ -191,40 +244,36 @@ def queries_from_hallucination_feedback(
     queries = []
 
     for detail in hallucination_details[:4]:
-        claim = detail.get('claim', '')
-        issue = detail.get('issue', '').lower()
-        evidence = detail.get('evidence', '')
+        claim = detail.get("claim", "")
+        issue = detail.get("issue", "").lower()
+        evidence = detail.get("evidence", "")
 
         # Strip citation markers to get the raw claim text
-        clean_claim = re.sub(
-            r'\[(?:Text Evidence|Question Image)\s*\d+\]', '', claim
-        ).strip().strip('"\'')
+        clean_claim = re.sub(r"\[(?:Text Evidence|Question Image)\s*\d+\]", "", claim).strip().strip("\"'")
 
-        if 'fake citation' in issue or 'not in evidence' in issue:
-            words = [w for w in clean_claim.lower().split()
-                     if w not in _STOP_WORDS and len(w) > 3]
+        if "fake citation" in issue or "not in evidence" in issue:
+            words = [w for w in clean_claim.lower().split() if w not in _STOP_WORDS and len(w) > 3]
             if words:
                 queries.append(" ".join(words[:6]))
 
-        elif 'misrepresented' in issue or 'fabricated' in issue:
+        elif "misrepresented" in issue or "fabricated" in issue:
             if evidence and evidence.lower() not in ("doesn't exist", "unknown"):
-                words = [w for w in evidence.lower().split()
-                         if w not in _STOP_WORDS and len(w) > 3]
+                words = [w for w in evidence.lower().split() if w not in _STOP_WORDS and len(w) > 3]
                 if words:
                     queries.append(" ".join(words[:6]))
-            words = [w for w in clean_claim.lower().split()
-                     if w not in _STOP_WORDS and len(w) > 3]
+            words = [w for w in clean_claim.lower().split() if w not in _STOP_WORDS and len(w) > 3]
             if words:
                 queries.append(" ".join(words[:5]) + " examples")
 
     return [q for q in queries if _is_valid_query(q, question)][:4]
+
 
 # Fallback: generate queries when LLM parsing yields nothing usable
 def generate_fallback_queries(question: str, choices: List[str]) -> List[str]:
     queries = []
 
     # Question-level anchor query (not produced by generate_choice_queries)
-    q_words = re.findall(r'\b[a-zA-Z]{3,}\b', question.lower())
+    q_words = re.findall(r"\b[a-zA-Z]{3,}\b", question.lower())
     key_terms = [w for w in q_words if w not in _STOP_WORDS][:5]
     if len(key_terms) >= 2:
         queries.append(f"{' '.join(key_terms[:3])} definition")
@@ -239,12 +288,10 @@ def generate_fallback_queries(question: str, choices: List[str]) -> List[str]:
 
     return [q for q in queries if _is_valid_query(q, question)][:6]
 
+
 # Main planner step
 def planner_step(state: State, model, tokenizer, kwargs) -> State:
-    with tracer.start_as_current_span(
-        "Planner", openinference_span_kind="chain"
-    ) as planner_span:
-
+    with tracer.start_as_current_span("Planner", openinference_span_kind="chain") as planner_span:
         if state.subqueries:
             state.query_history.append(state.subqueries.copy())
 
@@ -253,13 +300,9 @@ def planner_step(state: State, model, tokenizer, kwargs) -> State:
         if state.img_captions or state.img_ocr:
             parts = []
             if state.img_captions:
-                parts.append("Image: " + " | ".join(
-                    f"{k}: {v}" for k, v in state.img_captions.items()
-                ))
+                parts.append("Image: " + " | ".join(f"{k}: {v}" for k, v in state.img_captions.items()))
             if state.img_ocr:
-                parts.append("OCR: " + " | ".join(
-                    f"{k}: {v}" for k, v in state.img_ocr.items()
-                ))
+                parts.append("OCR: " + " | ".join(f"{k}: {v}" for k, v in state.img_ocr.items()))
             image_context = "\n".join(parts) + "\n"
 
         # Build prompt — ends with "[" to prime JSON array generation.
@@ -274,22 +317,16 @@ def planner_step(state: State, model, tokenizer, kwargs) -> State:
         # the opening "[".  The model still outputs a JSON array.
         if state.verifier_feedback and state.retry_count > 0:
             hd = state.hallucination_details or []
-            feedback_queries = queries_from_hallucination_feedback(
-                hd, state.question, state.choices
-            )
+            feedback_queries = queries_from_hallucination_feedback(hd, state.question, state.choices)
             feedback_parts = [
                 f"NOTE: Attempt {state.retry_count} was REJECTED ({state.hallucination}).",
                 f"Verifier feedback: {state.verifier_feedback.strip()[:400]}",
             ]
             if feedback_queries:
-                feedback_parts.append(
-                    "Suggested query directions: " + "; ".join(feedback_queries)
-                )
+                feedback_parts.append("Suggested query directions: " + "; ".join(feedback_queries))
             if state.subqueries:
                 failed_str = ", ".join(f'"{q}"' for q in state.subqueries[:4])
-                feedback_parts.append(
-                    f"Do not repeat these ineffective queries: {failed_str}"
-                )
+                feedback_parts.append(f"Do not repeat these ineffective queries: {failed_str}")
             feedback_note = "\n".join(feedback_parts)
 
             # Insert feedback between the last line of the template and the
@@ -308,15 +345,11 @@ def planner_step(state: State, model, tokenizer, kwargs) -> State:
         messages = [{"role": "user", "content": prompt}]
 
         # LLM inference
-        with tracer.start_as_current_span(
-            "Qwen2.5-7B", openinference_span_kind="llm"
-        ) as llm_span:
+        with tracer.start_as_current_span("Qwen2.5-7B", openinference_span_kind="llm") as llm_span:
             llm_span.set_attribute("llm.model_name", "unsloth/Qwen2.5-7B-Instruct-bnb-4bit")
             llm_span.set_attribute("llm.input_messages", str(messages))
 
-            text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
             with torch.no_grad():

@@ -1,25 +1,49 @@
-import math
 import re
-import numpy as np
-from typing import Dict, List
 
-###### PLANNER EVALUATION 
+
+###### PLANNER EVALUATION
 def planner_coverage_score(state) -> float:
     """Compute how well subqueries cover key concepts from question and choices."""
     if not state.subqueries:
         return 0.0
 
-    stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'what', 'which',
-                  'how', 'why', 'when', 'where', 'who', 'of', 'in', 'on', 'at',
-                  'to', 'for', 'with', 'by', 'from', 'as', 'this', 'that', 'it'}
+    stop_words = {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "what",
+        "which",
+        "how",
+        "why",
+        "when",
+        "where",
+        "who",
+        "of",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "with",
+        "by",
+        "from",
+        "as",
+        "this",
+        "that",
+        "it",
+    }
 
     def extract_terms(text: str) -> set:
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
         return {w for w in words if w not in stop_words}
 
     question_terms = extract_terms(state.question)
     choice_terms = set()
-    for choice in (state.choices or []):
+    for choice in state.choices or []:
         choice_terms.update(extract_terms(str(choice)))
 
     key_terms = question_terms | choice_terms
@@ -31,6 +55,7 @@ def planner_coverage_score(state) -> float:
 
     return covered / len(key_terms)
 
+
 def planner_hit_rate(state, k: int = 2, threshold: float = 0.5) -> bool:
     """Check if any subquery led to retrieving the gold answer.
     Uses batch encoding for efficiency — calling text_model.encode() inside
@@ -40,6 +65,7 @@ def planner_hit_rate(state, k: int = 2, threshold: float = 0.5) -> bool:
         return False
 
     from retriever.retriever import text_model  # lazy: avoids circular import
+
     gold_emb = text_model.encode(state.gold_answer, normalize_embeddings=True)
 
     for subquery, chunk_info in state.retrieved_chunks.items():
@@ -54,6 +80,7 @@ def planner_hit_rate(state, k: int = 2, threshold: float = 0.5) -> bool:
 
     return False
 
+
 def planner_specificity_score(state) -> float:
     """
     Compute specificity: Are subqueries specific enough (not too generic)?
@@ -63,7 +90,7 @@ def planner_specificity_score(state) -> float:
         return 0.0
 
     scores = []
-    generic_starts = ['what is', 'how does', 'definition of', 'explain', 'describe']
+    generic_starts = ["what is", "how does", "definition of", "explain", "describe"]
 
     for sq in state.subqueries:
         sq_lower = sq.lower().strip()

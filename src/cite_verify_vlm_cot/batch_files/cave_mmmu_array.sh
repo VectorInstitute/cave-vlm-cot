@@ -21,14 +21,14 @@
 #SBATCH --gres=gpu:a40:3
 #SBATCH --mem=120G
 #SBATCH --time=0-12:00:00
-#SBATCH --chdir=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
+#SBATCH --chdir=${CAVE_WORKDIR}/src/cite_verify_vlm_cot
 #SBATCH --output=/projects/cave-vlm-cot/logs/cave_mmmu_%j_%a.out
 #SBATCH --error=/projects/cave-vlm-cot/logs/cave_mmmu_%j_%a.err
 
 set -euo pipefail
 
 PROJECT_DIR=/projects/cave-vlm-cot
-WORKDIR=/fs02/home/sneharao/cave-vlm-cot/src/cite_verify_vlm_cot
+WORKDIR=${CAVE_WORKDIR}/src/cite_verify_vlm_cot
 LOGDIR=${PROJECT_DIR}/logs
 mkdir -p "${LOGDIR}" "${PROJECT_DIR}/hf_cache" "${PROJECT_DIR}/indexes"
 
@@ -47,7 +47,7 @@ module load scipy-stack
 module load faiss/1.12.0
 export PYTHONPATH="${PROJECT_DIR}/env/lib/python3.11/site-packages:$PYTHONPATH"
 
-source /fs02/home/sneharao/cave-vlm-cot/env/bin/activate
+source "${CAVE_WORKDIR}/env/bin/activate"
 
 export CAVE_PROJECT_DIR=/projects/cave-vlm-cot
 export HF_HOME=${CAVE_PROJECT_DIR}/hf_cache

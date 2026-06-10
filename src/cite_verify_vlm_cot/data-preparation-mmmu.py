@@ -32,9 +32,9 @@ Usage
   MMMU_SUBJECTS="Math,Physics" python data-preparation-mmmu.py
 """
 
+import ast
 import json
 import os
-import ast
 
 import pandas as pd
 import pytesseract
@@ -44,16 +44,15 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import BlipForConditionalGeneration, BlipProcessor
 
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-blip_model = BlipForConditionalGeneration.from_pretrained(
-    "Salesforce/blip-image-captioning-base"
-).to(device)
+blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
 
-TARGET_SIZE  = (224, 224)
+TARGET_SIZE = (224, 224)
 OUTPUT_ROOT = os.path.join(os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot"), "processed_images_mmmu")
-BATCH_SIZE   = 8
+BATCH_SIZE = 8
 
 # dev has explanations; validation does not.
 # test is excluded: gold answers are withheld.
@@ -63,23 +62,46 @@ SPLITS = ["dev", "validation"]
 #   MMMU_SUBJECTS="Math,Physics" python data-preparation-mmmu.py
 _subjects_env = os.environ.get("MMMU_SUBJECTS", "")
 ALL_SUBJECTS = [s.strip() for s in _subjects_env.split(",") if s.strip()] or [
-    "Accounting", "Agriculture", "Architecture_and_Engineering",
-    "Art", "Art_Theory", "Basic_Medical_Science", "Biology",
-    "Chemistry", "Clinical_Medicine", "Computer_Science",
-    "Design", "Diagnostics_and_Laboratory_Medicine", "Economics",
-    "Electronics", "Energy_and_Power", "Finance", "Geography",
-    "History", "Literature", "Manage", "Marketing",
-    "Materials", "Math", "Mechanical_Engineering",
-    "Music", "Pharmacy", "Physics", "Psychology",
-    "Public_Health", "Sociology",
+    "Accounting",
+    "Agriculture",
+    "Architecture_and_Engineering",
+    "Art",
+    "Art_Theory",
+    "Basic_Medical_Science",
+    "Biology",
+    "Chemistry",
+    "Clinical_Medicine",
+    "Computer_Science",
+    "Design",
+    "Diagnostics_and_Laboratory_Medicine",
+    "Economics",
+    "Electronics",
+    "Energy_and_Power",
+    "Finance",
+    "Geography",
+    "History",
+    "Literature",
+    "Manage",
+    "Marketing",
+    "Materials",
+    "Math",
+    "Mechanical_Engineering",
+    "Music",
+    "Pharmacy",
+    "Physics",
+    "Psychology",
+    "Public_Health",
+    "Sociology",
 ]
 
 # MMMU answers are letters; map to 0-based integer index.
 ANSWER_LETTER_TO_INDEX = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}
 
+
 # Helpers
 def letter_to_index(letter: str) -> int:
     return ANSWER_LETTER_TO_INDEX.get(str(letter).strip().upper(), 0)
+
 
 def collect_mmmu_images(row: dict, pid: str) -> list[str]:
     """
@@ -159,8 +181,8 @@ for subject in ALL_SUBJECTS:
 
             # Answer (letter → index)
             answer_letter = row.get("answer", "A") or "A"
-            answer_idx    = letter_to_index(answer_letter)
-            gold_answer   = choices[answer_idx] if 0 <= answer_idx < len(choices) else ""
+            answer_idx = letter_to_index(answer_letter)
+            gold_answer = choices[answer_idx] if 0 <= answer_idx < len(choices) else ""
 
             # Images
             image_paths = collect_mmmu_images(row, pid)
@@ -180,29 +202,29 @@ for subject in ALL_SUBJECTS:
             # subfield    →  topic     (narrow, e.g. "Calculus")
             # subject     →  category  (no finer grouping available)
             # (none)      →  skill     (leave empty)
-            mmmu_subject  = row.get("subject",  subject)
+            mmmu_subject = row.get("subject", subject)
             mmmu_subfield = row.get("subfield", "")
 
             examples.append(
                 {
-                    "pid":          pid,
-                    "split":        split,
-                    "question":     row.get("question", ""),
-                    "choices":      choices,        # list — serialised below
-                    "answer":       answer_idx,     # int, same as ScienceQA
-                    "gold_answer":  gold_answer,
-                    "image_paths":  image_paths,    # list — serialised below
-                    "hint":         "",             # MMMU has no hint field
+                    "pid": pid,
+                    "split": split,
+                    "question": row.get("question", ""),
+                    "choices": choices,  # list — serialised below
+                    "answer": answer_idx,  # int, same as ScienceQA
+                    "gold_answer": gold_answer,
+                    "image_paths": image_paths,  # list — serialised below
+                    "hint": "",  # MMMU has no hint field
                     # explanation (dev only) fills the lecture slot so it is
                     # automatically picked up by the FAISS index builder.
-                    "lecture":      explanation,
-                    "solution":     "",             # MMMU has no solution field
-                    "img_captions": {},             # filled in captioning pass
-                    "img_ocr":      {},             # filled in OCR pass
-                    "subject":      mmmu_subject,
-                    "topic":        mmmu_subfield,
-                    "category":     mmmu_subject,   # best available proxy
-                    "skill":        "",
+                    "lecture": explanation,
+                    "solution": "",  # MMMU has no solution field
+                    "img_captions": {},  # filled in captioning pass
+                    "img_ocr": {},  # filled in OCR pass
+                    "subject": mmmu_subject,
+                    "topic": mmmu_subfield,
+                    "category": mmmu_subject,  # best available proxy
+                    "skill": "",
                 }
             )
 
@@ -212,9 +234,7 @@ df = pd.DataFrame(examples)
 
 # Image captioning + OCR
 # Collect every unique on-disk path across all rows (images are already saved).
-all_image_paths = list(
-    dict.fromkeys(p for paths in df["image_paths"] for p in paths)
-)
+all_image_paths = list(dict.fromkeys(p for paths in df["image_paths"] for p in paths))
 print(f"Running BLIP captioning on {len(all_image_paths)} images")
 captions_batch = generate_captions_batch(all_image_paths, batch_size=BATCH_SIZE)
 
@@ -223,24 +243,24 @@ ocr_batch = {p: run_ocr(p) for p in tqdm(all_image_paths, desc="OCR")}
 
 # Write captions + OCR back into the dataframe, serialise list columns to JSON.
 for idx, row in tqdm(df.iterrows(), total=len(df), desc="Finalising rows"):
-    captions    = {}
+    captions = {}
     ocr_outputs = {}
 
     for img_path in row["image_paths"]:
         fname = os.path.basename(img_path)
-        captions[fname]    = captions_batch.get(img_path, "")
+        captions[fname] = captions_batch.get(img_path, "")
         ocr_outputs[fname] = ocr_batch.get(img_path, "")
 
-    df.at[idx, "image_paths"]  = json.dumps(row["image_paths"])
+    df.at[idx, "image_paths"] = json.dumps(row["image_paths"])
     df.at[idx, "img_captions"] = json.dumps(captions)
-    df.at[idx, "img_ocr"]      = json.dumps(ocr_outputs)
-    df.at[idx, "choices"]      = json.dumps(row["choices"])
+    df.at[idx, "img_ocr"] = json.dumps(ocr_outputs)
+    df.at[idx, "choices"] = json.dumps(row["choices"])
     # gold_answer is a plain string — no serialisation needed.
 
 # Save
 _output_dir = os.path.join(os.environ.get("CAVE_PROJECT_DIR", "/projects/cave-vlm-cot"), "outputs")
 os.makedirs(_output_dir, exist_ok=True)
-df.to_csv(os.path.join(_output_dir, "mmmu_augmented.csv"),  index=False)
+df.to_csv(os.path.join(_output_dir, "mmmu_augmented.csv"), index=False)
 df.to_json(os.path.join(_output_dir, "mmmu_augmented.json"), orient="records", indent=2)
 
 print(f"\nSaved mmmu_augmented.csv  ({len(df)} rows)")

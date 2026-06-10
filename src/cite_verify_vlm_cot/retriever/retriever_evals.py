@@ -1,7 +1,5 @@
 import math
-import re
-import numpy as np
-from typing import Dict, List
+
 
 ###### RETRIEVER EVALUATION
 def answer_support_recall(state) -> float:
@@ -11,18 +9,20 @@ def answer_support_recall(state) -> float:
     """
     if not state.retrieved_chunks or not state.gold_answer:
         return 0.0
-    
+
     from solver.solver_evals import get_nli_model  # lazy: avoids circular import
 
     nli_model = get_nli_model()
     all_chunks = [
-        chunk for ci in state.retrieved_chunks.values()
-        for chunk in ci.text_chunks[:3] if chunk and len(chunk.strip()) > 20
+        chunk
+        for ci in state.retrieved_chunks.values()
+        for chunk in ci.text_chunks[:3]
+        if chunk and len(chunk.strip()) > 20
     ][:10]
-    
+
     if not all_chunks:
         return 0.0
-    
+
     # Hypothesis: "The answer is [gold_answer]" or just the gold answer string
     hypothesis = f"The correct answer is: {state.gold_answer}"
     pairs = [(chunk, hypothesis) for chunk in all_chunks]
@@ -32,15 +32,16 @@ def answer_support_recall(state) -> float:
     # We use apply_softmax=True so scores are genuine probabilities in [0, 1].
     scores = nli_model.predict(pairs, apply_softmax=True)
     label_map = nli_model.config.id2label
-    entail_idx = {v.lower(): k for k, v in label_map.items()}.get('entailment', 1)
-    
+    entail_idx = {v.lower(): k for k, v in label_map.items()}.get("entailment", 1)
+
     best_entailment = max(float(s[entail_idx]) for s in scores)
     return 1.0 if best_entailment > 0.5 else 0.0
+
 
 def recall_at_k(state, k: int = 2) -> dict:
     """
     Compute Recall@K: Does top-K evidence support the gold answer?
-    
+
     Embeds (question + gold_answer) together so short answer labels like
     "sturgeon" get enough context to match relevant evidence passages.
     Falls back to substring check as a secondary signal.
@@ -49,10 +50,11 @@ def recall_at_k(state, k: int = 2) -> dict:
         return {"recall": 0.0, "hits": {}}
 
     from retriever.retriever import text_model  # lazy: avoids circular import
+
     SIMILARITY_THRESHOLD = 0.35  # lowered from 0.5 — contextual query is denser
 
     # Combine question + answer for a richer query embedding
-    question_text = getattr(state, 'question', '') or ''
+    question_text = getattr(state, "question", "") or ""
     gold_query = f"{question_text} {state.gold_answer}".strip()
     gold_emb = text_model.encode(gold_query, normalize_embeddings=True)
 
@@ -67,15 +69,14 @@ def recall_at_k(state, k: int = 2) -> dict:
             semantic_hit = bool(sims.max() > SIMILARITY_THRESHOLD)
 
             # Substring fallback for cases where answer is explicitly mentioned
-            substring_hit = any(
-                state.gold_answer.lower() in chunk.lower() for chunk in top_k
-            )
+            substring_hit = any(state.gold_answer.lower() in chunk.lower() for chunk in top_k)
 
             hit = semantic_hit or substring_hit
         hits[subquery] = hit
 
     recall = sum(hits.values()) / len(hits) if hits else 0.0
     return {"recall": recall, "hits": hits}
+
 
 def precision_at_k(state, k: int = 2) -> float:
     """
@@ -86,6 +87,7 @@ def precision_at_k(state, k: int = 2) -> float:
         return 0.0
 
     from retriever.retriever import text_model  # lazy: avoids circular import
+
     SIMILARITY_THRESHOLD = 0.5
 
     gold_emb = text_model.encode(state.gold_answer, normalize_embeddings=True)
@@ -102,6 +104,7 @@ def precision_at_k(state, k: int = 2) -> float:
     relevant = int((sims > SIMILARITY_THRESHOLD).sum())
     return relevant / len(all_evidence)
 
+
 def mean_reciprocal_rank(state) -> float:
     """
     Compute MRR: Average of 1/rank for first relevant document per query.
@@ -111,6 +114,7 @@ def mean_reciprocal_rank(state) -> float:
         return 0.0
 
     from retriever.retriever import text_model  # lazy: avoids circular import
+
     SIMILARITY_THRESHOLD = 0.5
 
     gold_emb = text_model.encode(state.gold_answer, normalize_embeddings=True)
@@ -131,6 +135,7 @@ def mean_reciprocal_rank(state) -> float:
 
     return sum(rr_scores) / len(rr_scores) if rr_scores else 0.0
 
+
 def ndcg_at_k(state, k: int = 2) -> float:
     """
     Compute NDCG@K: Normalized Discounted Cumulative Gain.
@@ -143,6 +148,7 @@ def ndcg_at_k(state, k: int = 2) -> float:
         return 0.0
 
     from retriever.retriever import text_model  # lazy: avoids circular import
+
     SIMILARITY_THRESHOLD = 0.5
 
     gold_emb = text_model.encode(state.gold_answer, normalize_embeddings=True)

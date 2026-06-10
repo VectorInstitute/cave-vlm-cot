@@ -1,17 +1,12 @@
 import json
+import os
 import re
+from typing import Dict, List
 
 import torch
-from transformers import AutoProcessor
 from langgraph.graph import END, StateGraph
 from tracer import tracer
 
-from typing import List, Dict
-
-import base64
-import os
-from io import BytesIO
-from PIL import Image
 
 try:
     from qwen_vl_utils import process_vision_info
@@ -19,18 +14,21 @@ except ImportError:
     process_vision_info = None  # pip install qwen-vl-utils
 
 # Import State and step functions
-from utils import State
-from extractor.planner import planner_step
-from retriever.retriever import retriever_step, BM25Retriever, text_to_embedding, rerank_with_cross_encoder
-from solver.solver import solver_step, solver_step_with_citation_retry
-from citation_injector.citation_injector import inject_citations_step, _build_text_chunk_list
-from prompts import VERIFIER_PROMPT_TEMPLATE
 from functools import partial
+
+from citation_injector.citation_injector import _build_text_chunk_list, inject_citations_step
+from extractor.planner import planner_step
+from prompts import VERIFIER_PROMPT_TEMPLATE
+from retriever.retriever import retriever_step
+from solver.solver import solver_step_with_citation_retry
+from utils import State
+
 
 def _extract_choice_letter(text: str) -> str:
     """Return the first standalone multiple-choice letter from text, or INCONCLUSIVE."""
-    match = re.search(r'\b([A-E])\b', text or "", re.IGNORECASE)
+    match = re.search(r"\b([A-E])\b", text or "", re.IGNORECASE)
     return match.group(1).upper() if match else "INCONCLUSIVE"
+
 
 def _extract_labeled_choice(output: str, label: str) -> str:
     match = re.search(
@@ -40,45 +38,52 @@ def _extract_labeled_choice(output: str, label: str) -> str:
     )
     return match.group(1).upper() if match else "INCONCLUSIVE"
 
+
 def _first_parameter_device(model) -> torch.device:
     try:
         return next(model.parameters()).device
     except StopIteration:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 def extract_topic_from_claim(claim: str) -> str:
     """Extract the topic being discussed from a claim"""
     # Remove citation markers
-    clean = re.sub(r'\[.*?\]', '', claim)
+    clean = re.sub(r"\[.*?\]", "", claim)
     # Get main subject (simple heuristic)
     words = clean.split()
-    return ' '.join(words[:10]) + '...' if len(words) > 10 else clean
+    return " ".join(words[:10]) + "..." if len(words) > 10 else clean
+
 
 def extract_key_terms(question: str, choices: List[str]) -> List[str]:
     """Extract important terms from question and choices"""
     key_terms = set()
     # Extract capitalized terms (likely proper nouns or important concepts)
-    capitalized = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', question)
+    capitalized = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", question)
     key_terms.update(capitalized)
     # Extract numbers and units
-    numbers_units = re.findall(r'\d+(?:\.\d+)?\s*(?:km|m|cm|kg|g|°C|°F|mph|%)?', question)
+    numbers_units = re.findall(r"\d+(?:\.\d+)?\s*(?:km|m|cm|kg|g|°C|°F|mph|%)?", question)
     key_terms.update(numbers_units)
     # Extract quoted terms
     quoted = re.findall(r'"([^"]+)"', question)
     key_terms.update(quoted)
     # Extract important words from choices (nouns, likely)
     for choice in choices:
-        words = [w for w in choice.split() if len(w) > 3 and w.lower() not in 
-                {'that', 'this', 'with', 'from', 'have', 'been', 'were', 'what', 'when'}]
+        words = [
+            w
+            for w in choice.split()
+            if len(w) > 3 and w.lower() not in {"that", "this", "with", "from", "have", "been", "were", "what", "when"}
+        ]
         key_terms.update(words[:2])
     return list(key_terms)
+
 
 def generate_targeted_feedback(
     hallucination_type: str,
     hallucination_details: List[Dict[str, str]],
     question: str,
     previous_queries: List[str],
-    choices: List[str]
+    choices: List[str],
 ) -> str:
     """
     Generate specific, actionable feedback based on hallucination analysis
@@ -89,9 +94,13 @@ def generate_targeted_feedback(
     feedback_parts = []
 
     # Analyze what went wrong
-    fake_citations = [h for h in hallucination_details if 'fake citation' in h.get('issue', '').lower()]
-    misrepresented = [h for h in hallucination_details if 'misrepresented' in h.get('issue', '').lower() or 'not in evidence' in h.get('issue', '').lower()]
-    fabricated = [h for h in hallucination_details if 'fabricated' in h.get('issue', '').lower()]
+    fake_citations = [h for h in hallucination_details if "fake citation" in h.get("issue", "").lower()]
+    misrepresented = [
+        h
+        for h in hallucination_details
+        if "misrepresented" in h.get("issue", "").lower() or "not in evidence" in h.get("issue", "").lower()
+    ]
+    fabricated = [h for h in hallucination_details if "fabricated" in h.get("issue", "").lower()]
 
     # Header
     feedback_parts.append(" VERIFICATION FAILED\n")
@@ -100,9 +109,9 @@ def generate_targeted_feedback(
         feedback_parts.append("PROBLEM: Solver cited evidence that doesn't exist")
         feedback_parts.append("\nMissing evidence types:")
         for h in fake_citations[:3]:  # Show top 3
-            if 'Text Evidence' in h['claim']:
+            if "Text Evidence" in h["claim"]:
                 feedback_parts.append(f"  • Needed text about: {extract_topic_from_claim(h['claim'])}")
-            elif 'Question Image' in h['claim']:
+            elif "Question Image" in h["claim"]:
                 feedback_parts.append(f"  • Needed image showing: {extract_topic_from_claim(h['claim'])}")
 
         feedback_parts.append("\n ACTION: Generate queries to retrieve this missing evidence")
@@ -122,7 +131,7 @@ def generate_targeted_feedback(
         feedback_parts.append("PROBLEM: Solver made unsupported factual claims")
         feedback_parts.append("\nFabricated information:")
         for h in fabricated[:3]:
-            feedback_parts.append(f"  • \"{h['claim'][:80]}...\"")
+            feedback_parts.append(f'  • "{h["claim"][:80]}..."')
 
         feedback_parts.append("\n ACTION: Retrieve authoritative sources")
         feedback_parts.append("STRATEGY:")
@@ -140,7 +149,7 @@ def generate_targeted_feedback(
 
     # Show what didn't work
     if previous_queries:
-        feedback_parts.append(f"\n AVOID similar queries to these (didn't retrieve what we need):")
+        feedback_parts.append("\n AVOID similar queries to these (didn't retrieve what we need):")
         for q in previous_queries[-3:]:  # Last 3 queries
             feedback_parts.append(f"  • {q}")
 
@@ -150,21 +159,22 @@ def generate_targeted_feedback(
         feedback_parts.append(f"\n KEY TERMS to include: {', '.join(key_terms[:5])}")
     return "\n".join(feedback_parts)
 
+
 def log_attempt(state: State):
     """
     Log current attempt for tracking progress across retries
     """
     attempt = {
-        'retry_count': state.retry_count,
-        'subqueries': state.subqueries.copy() if state.subqueries else [],
-        'verdict': state.verdict,
-        'confidence': state.confidence,
-        'hallucination': state.hallucination,
-        'num_hallucinations': len(state.hallucination_details),
-        'final_answer': state.final_answer
-
+        "retry_count": state.retry_count,
+        "subqueries": state.subqueries.copy() if state.subqueries else [],
+        "verdict": state.verdict,
+        "confidence": state.confidence,
+        "hallucination": state.hallucination,
+        "num_hallucinations": len(state.hallucination_details),
+        "final_answer": state.final_answer,
     }
     state.attempt_history.append(attempt)
+
 
 def parse_hallucination_details(full_output: str) -> List[Dict[str, str]]:
     """
@@ -188,6 +198,7 @@ def parse_hallucination_details(full_output: str) -> List[Dict[str, str]]:
 
     return hallucinations
 
+
 def prepare_images_for_verifier(state):
     """
     Prepare question image sources and descriptions for Qwen2.5-VL.
@@ -202,7 +213,7 @@ def prepare_images_for_verifier(state):
 
     MAX_IMAGES = 4  # keep low for consistent processor token counts
     # Question images: use file:// path (Qwen2.5-VL supports local files)
-    
+
     # Question images (from paths)
     for idx, img_path in enumerate(state.image_paths or []):
         if len(image_sources) >= MAX_IMAGES:
@@ -224,11 +235,10 @@ def prepare_images_for_verifier(state):
     print(f"Verifier: Prepared {len(image_sources)} question images (max allowed: {MAX_IMAGES})")
     return image_sources, descriptions
 
+
 def verifier_step(state: State, model, processor) -> State:
     """VLM verifier that examines actual images"""
-    with tracer.start_as_current_span(
-        "Verifier", openinference_span_kind="chain"
-    ) as verifier_span:
+    with tracer.start_as_current_span("Verifier", openinference_span_kind="chain") as verifier_span:
         # Prepare image sources and descriptions (file:// paths or data:image/png;base64,...)
         image_sources, image_descriptions = prepare_images_for_verifier(state)
 
@@ -241,17 +251,16 @@ def verifier_step(state: State, model, processor) -> State:
         #   4. caps total at 15 entries
         # Applying different rules here causes the verifier to see a different chunk
         # under the same label → it flags correct citations as fake/misrepresented.
-        # Build the evidence list via the canonical helper in citation injector so 
-        # [Text Evidence N] labels seen by the verifier are identical to what the solver 
+        # Build the evidence list via the canonical helper in citation injector so
+        # [Text Evidence N] labels seen by the verifier are identical to what the solver
         # was shown and what citation_injector used for injection.
-        all_text_chunks = _build_text_chunk_list(
-            state.retrieved_chunks, total_cap=15, truncate=400
-        )
+        all_text_chunks = _build_text_chunk_list(state.retrieved_chunks, total_cap=15, truncate=400)
 
-        text_evidence = "\n".join([
-            f"[Text Evidence {i+1}]: {chunk}"
-            for i, chunk in enumerate(all_text_chunks)
-        ]) if all_text_chunks else "No text evidence retrieved."
+        text_evidence = (
+            "\n".join([f"[Text Evidence {i + 1}]: {chunk}" for i, chunk in enumerate(all_text_chunks)])
+            if all_text_chunks
+            else "No text evidence retrieved."
+        )
 
         # Format visual evidence descriptions (not with image tokens)
         # Include the count of images actually shown so the verifier does not
@@ -263,7 +272,8 @@ def verifier_step(state: State, model, processor) -> State:
             f"NOTE: Only {num_images_shown} of {num_images_total} question images are shown above "
             f"due to display limits. [Question Image N] citations for N > {num_images_shown} "
             f"reference valid images that were not displayed — do NOT flag these as fake citations.\n"
-            if num_images_total > num_images_shown else ""
+            if num_images_total > num_images_shown
+            else ""
         )
         visual_evidence = images_note + (
             "\n".join(image_descriptions) if image_descriptions else "No visual evidence retrieved."
@@ -277,16 +287,14 @@ def verifier_step(state: State, model, processor) -> State:
         solver_reasoning_str = "\n".join(state.reasoning_steps or [])
         solver_reasoning_str = solver_reasoning_str[:1500]  # cap at ~375 tokens
 
-        choices_str = "\n".join(
-            f"{chr(ord('A') + i)}: {c}" for i, c in enumerate(state.choices or [])
-        )
+        choices_str = "\n".join(f"{chr(ord('A') + i)}: {c}" for i, c in enumerate(state.choices or []))
         prompt = VERIFIER_PROMPT_TEMPLATE.format(
             question=state.question,
             choices=choices_str,
             solver_reasoning=solver_reasoning_str,
             text_evidence=text_evidence,
             visual_evidence=visual_evidence,
-            solver_answer=state.final_answer
+            solver_answer=state.final_answer,
         )
 
         # Log input attributes
@@ -300,8 +308,8 @@ def verifier_step(state: State, model, processor) -> State:
             vlm_span.set_attribute("vlm.model_name", model_name)
 
             # Official Qwen2.5-VL flow (https://huggingface.co/Qwen/Qwen2.5-VL-8B-Instruct):
-            # 1) Messages with image sources in content; 2) apply_chat_template; 
-            # 3) process_vision_info(messages); 
+            # 1) Messages with image sources in content; 2) apply_chat_template;
+            # 3) process_vision_info(messages);
             # 4) processor(text=..., images=image_inputs, videos=video_inputs)
             if image_sources:
                 content = [
@@ -314,11 +322,7 @@ def verifier_step(state: State, model, processor) -> State:
                 messages = [{"role": "user", "content": prompt}]
 
             # Apply chat template
-            text = processor.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
-            )
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
             if process_vision_info is None:
                 raise ImportError(
@@ -337,13 +341,13 @@ def verifier_step(state: State, model, processor) -> State:
                 videos=video_inputs,
                 padding=True,
                 # max_length=8192,
-                return_tensors="pt"
+                return_tensors="pt",
             ).to(_first_parameter_device(model))
 
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=2048,  # 5-step CoT + structured output 
+                    max_new_tokens=2048,  # 5-step CoT + structured output
                     temperature=0.0,  # Deterministic for consistency
                     do_sample=False,
                 )
@@ -353,7 +357,7 @@ def verifier_step(state: State, model, processor) -> State:
             # Decode the output properly
             # outputs is a tensor of shape [batch_size, sequence_length]
             # Use batch_decode for proper decoding
-            input_len = inputs['input_ids'].shape[1]
+            input_len = inputs["input_ids"].shape[1]
             new_tokens = outputs[0][input_len:]
             full_output = processor.decode(new_tokens, skip_special_tokens=True).strip()
             decoded = full_output  # keep for vlm_span logging
@@ -374,8 +378,7 @@ def verifier_step(state: State, model, processor) -> State:
         # Use IGNORECASE throughout and handle markdown bold (**VERIFIED**) that
         # Qwen2.5-VL sometimes emits.
         final_verdict = re.search(
-            r"Final\s+Verdict:\s*\*{0,2}\[?(VERIFIED|REJECTED)\]?\*{0,2}",
-            full_output, re.IGNORECASE
+            r"Final\s+Verdict:\s*\*{0,2}\[?(VERIFIED|REJECTED)\]?\*{0,2}", full_output, re.IGNORECASE
         )
         if final_verdict:
             state.verdict = final_verdict.group(1).upper()
@@ -386,18 +389,18 @@ def verifier_step(state: State, model, processor) -> State:
         if state.verdict == "UNKNOWN":
             halluc_hint = re.search(
                 r"Hallucination Check:\s*\[?(NONE DETECTED|MINOR HALLUCINATIONS|MAJOR HALLUCINATIONS)\]?",
-                full_output, re.IGNORECASE
+                full_output,
+                re.IGNORECASE,
             )
             if halluc_hint:
                 hval = halluc_hint.group(1).upper()
                 state.verdict = "VERIFIED" if hval == "NONE DETECTED" else "REJECTED"
-                print(f"  [VERDICT DERIVED] Final Verdict line missing — "
-                      f"derived {state.verdict} from Hallucination Check: {hval}")
+                print(
+                    f"  [VERDICT DERIVED] Final Verdict line missing — "
+                    f"derived {state.verdict} from Hallucination Check: {hval}"
+                )
 
-        confidence_match = re.search(
-            r"Confidence:\s*\*{0,2}\[?(HIGH|MEDIUM|LOW)\]?\*{0,2}",
-            full_output, re.IGNORECASE
-        )
+        confidence_match = re.search(r"Confidence:\s*\*{0,2}\[?(HIGH|MEDIUM|LOW)\]?\*{0,2}", full_output, re.IGNORECASE)
         if confidence_match:
             state.confidence = confidence_match.group(1).upper()
 
@@ -406,9 +409,7 @@ def verifier_step(state: State, model, processor) -> State:
         # the solver, because that caused false accepts in the 425-row shard.
         independent_answer = _extract_labeled_choice(full_output, "Independent Answer")
         verified_answer = _extract_labeled_choice(full_output, "Verified Answer")
-        state.verifier_answer = (
-            independent_answer if independent_answer != "INCONCLUSIVE" else verified_answer
-        )
+        state.verifier_answer = independent_answer if independent_answer != "INCONCLUSIVE" else verified_answer
 
         # Multiple-choice answer adjudication: if the verifier names a different
         # answer than the solver, force a rejection even if the free-text verdict
@@ -463,9 +464,7 @@ def verifier_step(state: State, model, processor) -> State:
 
         # Track metrics
         verifier_span.set_attribute("verifier.verdict", state.verdict)
-        verifier_span.set_attribute(
-            "verifier.hallucination_count", len(state.hallucination_details)
-        )
+        verifier_span.set_attribute("verifier.hallucination_count", len(state.hallucination_details))
         verifier_span.set_attribute("verifier.retry_count", state.retry_count)
         verifier_span.set_attribute("verifier.confidence", state.confidence)
 
@@ -502,10 +501,10 @@ def should_retry_planning(state: State, max_retries: int = 3) -> bool:
     # finding is uncertain enough to warrant one more attempt — the verifier
     # may have misread the image or been misled by injected text citations.
     if state.hallucination == "MINOR HALLUCINATIONS":
-    # and state.confidence in [
-    #     "LOW",
-    #     "MEDIUM",
-    # ]:
+        # and state.confidence in [
+        #     "LOW",
+        #     "MEDIUM",
+        # ]:
         return True
 
     return False
@@ -514,7 +513,7 @@ def should_retry_planning(state: State, max_retries: int = 3) -> bool:
 def should_plan(state: State, max_retries: int = 3) -> str:
     """
     Improved routing logic using the helper function
-    """  
+    """
     # Use the helper function for cleaner logic
     if should_retry_planning(state, max_retries=max_retries):
         # retry_count has already been incremented by verifier_step, so
@@ -530,6 +529,7 @@ def should_plan(state: State, max_retries: int = 3) -> str:
         print(f"   Attempt history: {len(state.attempt_history)} attempts")
 
     return END
+
 
 def _should_skip_verifier(state: State) -> bool:
     """
@@ -572,30 +572,31 @@ def _should_skip_verifier(state: State) -> bool:
     if total_chunks == 0:
         # No evidence retrieved at all — verifier will spuriously REJECT.
         # Auto-verify instead so the solver's parametric answer is preserved.
-        print(f"  [VerifierSkip] Zero text chunks retrieved — "
-              f"skipping verifier to avoid spurious retrieval-failure rejection.")
+        print(
+            "  [VerifierSkip] Zero text chunks retrieved — "
+            "skipping verifier to avoid spurious retrieval-failure rejection."
+        )
         return True
 
     # Condition B: text-only + well-cited
     # Never skip for image questions
-    has_images = any(
-        p for p in (state.image_paths or []) if p and os.path.exists(p)
-    )
+    has_images = any(p for p in (state.image_paths or []) if p and os.path.exists(p))
     if has_images:
         return False
-    
+
     # Require a successfully extracted answer letter
-    fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
+    fa_match = re.search(r"\b([A-E])\b", state.final_answer or "")
     if not fa_match:
         return False
-    
+
     # Require ≥2 text citations (the injector ran and found grounding evidence)
-    reasoning = ' '.join(state.reasoning_steps or [])
-    text_cites = len(re.findall(r'\[Text Evidence \d+\]', reasoning))
+    reasoning = " ".join(state.reasoning_steps or [])
+    text_cites = len(re.findall(r"\[Text Evidence \d+\]", reasoning))
     if text_cites < 2:
         return False
-    
+
     return True
+
 
 def _auto_verify_step(state: State) -> State:
     """
@@ -608,31 +609,37 @@ def _auto_verify_step(state: State) -> State:
          missing citations that were never available.
       B) Text-only question with ≥2 citations — verifier adds no signal.
     """
-    fa_match = re.search(r'\b([A-E])\b', state.final_answer or "")
+    fa_match = re.search(r"\b([A-E])\b", state.final_answer or "")
     letter = fa_match.group(1) if fa_match else "INCONCLUSIVE"
-    state.verdict          = "VERIFIED"
-    state.confidence       = "HIGH"
-    state.verifier_answer  = letter
-    state.hallucination    = "NONE DETECTED"
+    state.verdict = "VERIFIED"
+    state.confidence = "HIGH"
+    state.verifier_answer = letter
+    state.hallucination = "NONE DETECTED"
     state.hallucination_details = []
     state.verifier_feedback = None
     log_attempt(state)
     state.retry_count += 1
-    
+
     # Determine skip reason for logging
     total_chunks = sum(
-        len([c for c in (v.get("text_chunks", []) if isinstance(v, dict) else [])
-             if isinstance(c, str) and len(c.strip()) > 10])
+        len(
+            [
+                c
+                for c in (v.get("text_chunks", []) if isinstance(v, dict) else [])
+                if isinstance(c, str) and len(c.strip()) > 10
+            ]
+        )
         for k, v in (state.retrieved_chunks or {}).items()
         if not k.startswith("_")
     )
     if total_chunks == 0:
         print(f"  [VerifierSkip/RetrievalFailure] No chunks → auto-VERIFIED ({letter})")
     else:
-        reasoning_text = ' '.join(state.reasoning_steps or [])
-        cite_count = len(re.findall(r'\[Text Evidence \d+\]', reasoning_text))
+        reasoning_text = " ".join(state.reasoning_steps or [])
+        cite_count = len(re.findall(r"\[Text Evidence \d+\]", reasoning_text))
         print(f"  [VerifierSkip/WellCited] Text-only + {cite_count} citations → auto-VERIFIED ({letter})")
     return state
+
 
 # def _conditional_verifier_step(verifier_model, verifier_processor) -> callable:
 #     """
@@ -654,15 +661,17 @@ def _auto_verify_step(state: State) -> State:
 #             return _full_verifier(state)
 #     return _node
 
+
 def _conditional_verifier_step(verifier_model, verifier_processor) -> callable:
     _full_verifier = partial(verifier_step, model=verifier_model, processor=verifier_processor)
+
     def _node(state: State) -> State:
-        with tracer.start_as_current_span(
-            "Verifier", openinference_span_kind="chain"
-        ) as span:
+        with tracer.start_as_current_span("Verifier", openinference_span_kind="chain") as span:
             span.set_attribute("verifier.skipped", False)
             return _full_verifier(state)
+
     return _node
+
 
 def build_cave_vlm_cot_graph(
     planner_model,
@@ -683,7 +692,6 @@ def build_cave_vlm_cot_graph(
     Question images are passed directly to the
     solver via state.image_paths and cited as [Question Image N].
     """
-
     # Create partial functions with models/parameters bound
     planner_node = partial(
         planner_step,
@@ -730,6 +738,7 @@ def build_cave_vlm_cot_graph(
     graph.add_conditional_edges("verify", should_plan, {"plan": "plan", END: END})
 
     return graph.compile()
+
 
 # Ablation graph builders
 def build_retrieval_solver_graph(
@@ -781,6 +790,7 @@ def build_retrieval_solver_graph(
 
     return graph.compile()
 
+
 def build_solver_only_graph(
     solver_model,
     solver_processor,
@@ -805,6 +815,7 @@ def build_solver_only_graph(
     graph.set_entry_point("solve")
     graph.add_edge("solve", END)
     return graph.compile()
+
 
 def build_pipeline_without_citation_injector(
     planner_model,
@@ -853,7 +864,7 @@ def build_pipeline_without_citation_injector(
     graph.add_node("verify", verifier_node)
 
     graph.set_entry_point("plan")
-    
+
     graph.add_edge("plan", "retrieve")
     graph.add_edge("retrieve", "solve")
     # Solver output goes directly to verifier — no citation injection.

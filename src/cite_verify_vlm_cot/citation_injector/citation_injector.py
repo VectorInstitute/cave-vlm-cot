@@ -16,16 +16,16 @@ Integration in verifier.py / build_cave_vlm_cot_graph:
     state = inject_citations(state, encoder=cross_encoder)
 """
 
-import re
 import os
-from typing import List, Dict, Tuple, Optional
+import re
+from typing import Dict, List, Tuple
 
-from utils import State
 from retriever.retriever import cross_encoder, web_search
-from utils import ChunkInfo
+from utils import ChunkInfo, State
+
 
 # ms-marco cross-encoder scores range roughly -10 to +10
-# 0.5 balances precision and recall for the larger evidence pool 
+# 0.5 balances precision and recall for the larger evidence pool
 # (web-first merge, cross-encoder filtered local docs).
 # History:
 #   0.8 → too conservative, many valid pairs in 0.4–0.8 range went uncited
@@ -39,7 +39,7 @@ MIN_CLAIM_LENGTH = 20  # skip very short fragments
 # when retrieved evidence didn't cover a reasoning step. We recover citations
 # for these by running a targeted web search at inject time.
 _DK_RE = re.compile(
-    r'From domain knowledge[,.]?\s+(.{20,}?)(?=[.!?]|\Z)',
+    r"From domain knowledge[,.]?\s+(.{20,}?)(?=[.!?]|\Z)",
     re.IGNORECASE,
 )
 # Maximum number of domain-knowledge claims to web-search per question
@@ -48,14 +48,16 @@ _DK_MAX_LOOKUPS = 3
 
 # XML-like tags the solver produces — not real claims
 _TAG_PATTERN = re.compile(
-    r'</?(?:SUMMARY|CAPTION|REASONING|CONCLUSION|OBSERVATIONS|summary|caption|reasoning|conclusion|observations)>'
+    r"</?(?:SUMMARY|CAPTION|REASONING|CONCLUSION|OBSERVATIONS|summary|caption|reasoning|conclusion|observations)>"
 )
+
 
 # Claim splitting
 def _get_observations_span(reasoning: str):
     """Return (start, end) char span of <OBSERVATIONS>...</OBSERVATIONS>, or None."""
-    m = re.search(r'<OBSERVATIONS>(.*?)</OBSERVATIONS>', reasoning, re.IGNORECASE | re.DOTALL)
+    m = re.search(r"<OBSERVATIONS>(.*?)</OBSERVATIONS>", reasoning, re.IGNORECASE | re.DOTALL)
     return (m.start(), m.end()) if m else None
+
 
 def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
     """
@@ -68,7 +70,7 @@ def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
     obs_span = _get_observations_span(reasoning)
 
     # Split on sentence ends, step markers, and bullet points
-    segments = re.split(r'(?<=[.!?])\s+|(?=- Step \d)|(?=\n-\s)', reasoning)
+    segments = re.split(r"(?<=[.!?])\s+|(?=- Step \d)|(?=\n-\s)", reasoning)
 
     offset = 0
     for seg in segments:
@@ -78,23 +80,19 @@ def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
             continue
 
         # Skip lines that are just XML tags or tag + whitespace
-        stripped = _TAG_PATTERN.sub('', seg).strip()
+        stripped = _TAG_PATTERN.sub("", seg).strip()
         if len(stripped) < MIN_CLAIM_LENGTH:
             offset += len(seg) + 1
             continue
 
         # Check for existing citations (Text Evidence or any image citation)
-        existing = re.findall(
-            r'\[Text Evidence \d+\]|\[Image ROI \d+\]|\[Question Image \d+\]', seg
-        )
+        existing = re.findall(r"\[Text Evidence \d+\]|\[Image ROI \d+\]|\[Question Image \d+\]", seg)
 
         # Clean text for cross-encoder matching (remove all citation labels)
-        clean_text = re.sub(
-            r'\[Text Evidence \d+\]|\[Image ROI \d+\]|\[Question Image \d+\]', '', seg
-        ).strip()
+        clean_text = re.sub(r"\[Text Evidence \d+\]|\[Image ROI \d+\]|\[Question Image \d+\]", "", seg).strip()
 
         # Also strip any remaining XML tags
-        clean_text = _TAG_PATTERN.sub('', clean_text).strip()
+        clean_text = _TAG_PATTERN.sub("", clean_text).strip()
 
         if len(clean_text) >= MIN_CLAIM_LENGTH:
             # Search from `offset` so repeated phrases resolve to the
@@ -106,19 +104,22 @@ def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
             # Observation sentences are image-derived and should never receive
             # text evidence citations — only [Question Image N] citations.
             in_obs = bool(obs_span and claim_start >= obs_span[0] and claim_start < obs_span[1])
-            claims.append({
-                'text': clean_text,
-                'original': seg,
-                'start': claim_start,
-                'end': claim_start + len(seg),
-                'existing_citations': existing,
-                'matched_citations': [],
-                'in_observations': in_obs,
-            })
+            claims.append(
+                {
+                    "text": clean_text,
+                    "original": seg,
+                    "start": claim_start,
+                    "end": claim_start + len(seg),
+                    "existing_citations": existing,
+                    "matched_citations": [],
+                    "in_observations": in_obs,
+                }
+            )
 
         offset += len(seg) + 1
 
     return claims
+
 
 # CANONICAL EVIDENCE LIST BUILDER
 
@@ -139,6 +140,7 @@ def split_reasoning_into_claims(reasoning: str) -> List[Dict]:
 #   6. Truncate each chunk to `truncate` chars (default 500).  Pass
 #      truncate=400 when building the solver prompt to preserve old behaviour.
 
+
 def _is_yesno_dk_key(query: str, retrieved_chunks: dict) -> bool:
     """Return True for dk_web_ keys that were generated from yes/no answer choices.
     For yes/no MCQ questions the planner creates dk_web_<answer_choice> queries
@@ -151,8 +153,9 @@ def _is_yesno_dk_key(query: str, retrieved_chunks: dict) -> bool:
     """
     if not query.startswith("dk_web_"):
         return False
-    suffix = query[len("dk_web_"):].strip().lower()
+    suffix = query[len("dk_web_") :].strip().lower()
     return suffix.endswith(" yes") or suffix.endswith(" no") or suffix in ("yes", "no")
+
 
 def _build_text_chunk_list(
     retrieved_chunks: dict,
@@ -172,7 +175,9 @@ def _build_text_chunk_list(
                     build_evidence_index; use 10 only for backward compat)
         truncate:   truncate each chunk to this many characters (500 default;
                     solver prompt uses 400 for context-length safety)
-    Returns:
+
+    Returns
+    -------
         List of chunk strings, 0-indexed, where index i → [Text Evidence i+1].
     """
     if not retrieved_chunks:
@@ -181,22 +186,25 @@ def _build_text_chunk_list(
     # Exception: skip dk_web_ keys derived from yes/no answer choices — these
     # retrieve generic conversational-English content instead of factual evidence
     # and poison the evidence list for factual yes/no questions.
-    dk_keys = [q for q in retrieved_chunks
-               if isinstance(q, str) and q.startswith("dk_web_")
-               and not _is_yesno_dk_key(q, retrieved_chunks)]
-    other_keys = [q for q in retrieved_chunks
-                  if q not in dk_keys
-                  and not (isinstance(q, str) and q.startswith("_"))
-                  and not (isinstance(q, str) and _is_yesno_dk_key(q, retrieved_chunks))]
+    dk_keys = [
+        q
+        for q in retrieved_chunks
+        if isinstance(q, str) and q.startswith("dk_web_") and not _is_yesno_dk_key(q, retrieved_chunks)
+    ]
+    other_keys = [
+        q
+        for q in retrieved_chunks
+        if q not in dk_keys
+        and not (isinstance(q, str) and q.startswith("_"))
+        and not (isinstance(q, str) and _is_yesno_dk_key(q, retrieved_chunks))
+    ]
     ordered_keys = dk_keys + other_keys
     chunks = []
     for query in ordered_keys:
         chunk_info = retrieved_chunks[query]
-        raw = (chunk_info.text_chunks
-               if hasattr(chunk_info, "text_chunks")
-               else chunk_info.get("text_chunks", []))
-        for chunk in raw[:5]:                         # per-query cap
-            if chunk and len(chunk.strip()) > 10:     # length filter
+        raw = chunk_info.text_chunks if hasattr(chunk_info, "text_chunks") else chunk_info.get("text_chunks", [])
+        for chunk in raw[:5]:  # per-query cap
+            if chunk and len(chunk.strip()) > 10:  # length filter
                 text = chunk.strip()
                 if truncate:
                     text = text[:truncate]
@@ -206,12 +214,14 @@ def _build_text_chunk_list(
 
     return chunks[:total_cap]
 
+
 # Evidence index
 def _is_generic_lecture(chunk: str) -> bool:
     """Detect ScienceQA generic lecture prefixes that aren't specific evidence."""
     prefixes = ("natural science", "social science", "language science")
     stripped = chunk.strip().lower()
     return any(stripped.startswith(p) for p in prefixes)
+
 
 def build_evidence_index(state: State) -> Tuple[List[str], List[str], List[bool]]:
     """
@@ -220,23 +230,23 @@ def build_evidence_index(state: State) -> Tuple[List[str], List[str], List[bool]
     source of truth), so label numbers here match solver and verifier exactly.
     Generic lecture chunks are included (to preserve label alignment) but
     flagged via is_generic so match_claims_to_evidence can skip them.
-    Returns:
+
+    Returns
+    -------
         evidence_texts: content strings
         evidence_labels: labels like "[Text Evidence 1]" or "[Question Image 1]"
         is_generic: whether each entry is a generic lecture (skip during matching)
     """
     # Delegate to canonical helper — same ordering, filtering, and cap as
     # solver.format_evidence, verifier_step, and get_text_evidence_by_id.
-    text_chunks = _build_text_chunk_list(
-        state.retrieved_chunks, total_cap=15, truncate=500
-    )
-    evidence_texts  = list(text_chunks)
-    evidence_labels = [f"[Text Evidence {i+1}]" for i in range(len(text_chunks))]
-    is_generic      = [_is_generic_lecture(c) for c in text_chunks]
-    
+    text_chunks = _build_text_chunk_list(state.retrieved_chunks, total_cap=15, truncate=500)
+    evidence_texts = list(text_chunks)
+    evidence_labels = [f"[Text Evidence {i + 1}]" for i in range(len(text_chunks))]
+    is_generic = [_is_generic_lecture(c) for c in text_chunks]
+
     # Add Question Image captions for matching
     qi_idx = 1
-    for img_path in (state.image_paths or []):
+    for img_path in state.image_paths or []:
         if img_path and os.path.exists(img_path):
             img_filename = os.path.basename(img_path)
             caption = (state.img_captions or {}).get(img_filename, "")
@@ -244,7 +254,7 @@ def build_evidence_index(state: State) -> Tuple[List[str], List[str], List[bool]
             if caption:
                 img_desc = f"Image showing: {caption}"
             else:
-                img_desc = f"Visual evidence from question image showing the subject matter"
+                img_desc = "Visual evidence from question image showing the subject matter"
             evidence_texts.append(img_desc)
             evidence_labels.append(f"[Question Image {qi_idx}]")
             is_generic.append(False)  # images are never generic lectures
@@ -252,6 +262,7 @@ def build_evidence_index(state: State) -> Tuple[List[str], List[str], List[bool]
             if qi_idx > 5:  # Max 5 question images
                 break
     return evidence_texts, evidence_labels, is_generic
+
 
 # Cross-encoder matching
 def match_claims_to_evidence(
@@ -273,13 +284,13 @@ def match_claims_to_evidence(
 
     for claim in claims:
         # Skip claims that already have citations
-        if claim['existing_citations']:
+        if claim["existing_citations"]:
             continue
 
         # Skip claims inside <OBSERVATIONS> — these describe what the model
         # sees in images and should only ever cite [Question Image N], never
         # text evidence. The QI injection step handles them separately.
-        if claim.get('in_observations'):
+        if claim.get("in_observations"):
             continue
 
         # Build pairs, filtering out generic lectures while keeping
@@ -290,7 +301,7 @@ def match_claims_to_evidence(
         for i, ev in enumerate(evidence_texts):
             if is_generic and i < len(is_generic) and is_generic[i]:
                 continue  # skip generic lectures
-            pairs.append([claim['text'], ev])
+            pairs.append([claim["text"], ev])
             filtered_labels.append(evidence_labels[i])
             filtered_texts.append(ev)
         if not pairs:
@@ -309,13 +320,16 @@ def match_claims_to_evidence(
 
         for label, score, ev_text in scored[:max_citations_per_claim]:
             if score >= threshold:
-                claim['matched_citations'].append({
-                    'label': label,
-                    'score': float(score),
-                    'evidence_preview': ev_text[:80],
-                })
+                claim["matched_citations"].append(
+                    {
+                        "label": label,
+                        "score": float(score),
+                        "evidence_preview": ev_text[:80],
+                    }
+                )
 
     return claims
+
 
 # Citation insertion
 def inject_citations_into_reasoning(reasoning: str, claims: List[Dict]) -> str:
@@ -327,11 +341,11 @@ def inject_citations_into_reasoning(reasoning: str, claims: List[Dict]) -> str:
     insertions = []  # (position, chars_to_delete, replacement_text)
 
     for claim in claims:
-        if not claim['matched_citations']:
+        if not claim["matched_citations"]:
             continue
 
-        labels = [m['label'] for m in claim['matched_citations']]
-        original = claim['original']
+        labels = [m["label"] for m in claim["matched_citations"]]
+        original = claim["original"]
         pos = reasoning.find(original)
         if pos < 0:
             # Fallback: try from the beginning in case offset drifted slightly
@@ -339,15 +353,15 @@ def inject_citations_into_reasoning(reasoning: str, claims: List[Dict]) -> str:
         if pos < 0:
             continue
 
-        if original.rstrip().endswith('.'):
+        if original.rstrip().endswith("."):
             # Replace trailing period: "claim." → "claim [citation]."
             period_pos = pos + len(original.rstrip()) - 1
-            citation_str = ' ' + ' '.join(labels) + '.'
+            citation_str = " " + " ".join(labels) + "."
             insertions.append((period_pos, 1, citation_str))
         else:
             # Append after claim
             insert_at = pos + len(original)
-            citation_str = ' ' + ' '.join(labels)
+            citation_str = " " + " ".join(labels)
             insertions.append((insert_at, 0, citation_str))
 
     # Sort descending by position so earlier insertions don't shift later offsets.
@@ -356,9 +370,10 @@ def inject_citations_into_reasoning(reasoning: str, claims: List[Dict]) -> str:
 
     result = reasoning
     for pos, delete_len, text, _idx in insertions_with_idx:
-        result = result[:pos] + text + result[pos + delete_len:]
+        result = result[:pos] + text + result[pos + delete_len :]
 
     return result
+
 
 def inject_qi_into_observations(reasoning: str, num_images: int) -> str:
     """
@@ -382,18 +397,14 @@ def inject_qi_into_observations(reasoning: str, num_images: int) -> str:
     """
     if num_images == 0:
         return reasoning
-    
-    obs_match = re.search(
-        r'(<OBSERVATIONS>)(.*?)(</OBSERVATIONS>)',
-        reasoning,
-        re.IGNORECASE | re.DOTALL
-    )
-    
+
+    obs_match = re.search(r"(<OBSERVATIONS>)(.*?)(</OBSERVATIONS>)", reasoning, re.IGNORECASE | re.DOTALL)
+
     if not obs_match:
         return reasoning
 
     obs_content = obs_match.group(2)
-    lines = obs_content.split('\n')
+    lines = obs_content.split("\n")
     new_lines = []
     last_img_num = 1  # running tracker for multi-image inference
 
@@ -401,32 +412,27 @@ def inject_qi_into_observations(reasoning: str, num_images: int) -> str:
         stripped = line.strip()
 
         # Skip blank lines and lines that are just dashes/bullets with no content
-        if not stripped or stripped in ('-', '*', '•'):
+        if not stripped or stripped in ("-", "*", "•"):
             new_lines.append(line)
             continue
 
         # Skip if already has a [Question Image N] citation
-        if '[Question Image' in line:
+        if "[Question Image" in line:
             # Update tracker in case we see "Image 2" already cited
-            m = re.search(r'\[Question Image (\d+)\]', line)
+            m = re.search(r"\[Question Image (\d+)\]", line)
             if m:
                 last_img_num = int(m.group(1))
             new_lines.append(line)
             continue
 
         # Case 1: explicit "Image N" reference in the line — inject inline
-        img_ref = re.search(r'[Ii]mage\s*(\d+)', line)
+        img_ref = re.search(r"[Ii]mage\s*(\d+)", line)
         if img_ref:
             img_num = int(img_ref.group(1))
             if 1 <= img_num <= num_images:
                 last_img_num = img_num
-                citation = f'[Question Image {img_num}]'
-                line = re.sub(
-                    r'([Ii]mage\s*\d+:?)',
-                    rf'\1 {citation}',
-                    line,
-                    count=1
-                )
+                citation = f"[Question Image {img_num}]"
+                line = re.sub(r"([Ii]mage\s*\d+:?)", rf"\1 {citation}", line, count=1)
             new_lines.append(line)
             continue
 
@@ -435,15 +441,16 @@ def inject_qi_into_observations(reasoning: str, num_images: int) -> str:
         # (guards against injecting on section headers or very short fragments).
         if len(stripped) >= 15:
             img_num = last_img_num if num_images >= last_img_num else 1
-            citation = f'[Question Image {img_num}]'
+            citation = f"[Question Image {img_num}]"
             # Append before trailing period if present, otherwise at end
-            if line.rstrip().endswith('.'):
-                line = line.rstrip()[:-1] + f' {citation}.'
+            if line.rstrip().endswith("."):
+                line = line.rstrip()[:-1] + f" {citation}."
             else:
-                line = line.rstrip() + f' {citation}'
+                line = line.rstrip() + f" {citation}"
         new_lines.append(line)
-    new_obs = '\n'.join(new_lines)
-    return reasoning[:obs_match.start(2)] + new_obs + reasoning[obs_match.end(2):]
+    new_obs = "\n".join(new_lines)
+    return reasoning[: obs_match.start(2)] + new_obs + reasoning[obs_match.end(2) :]
+
 
 def _has_sufficient_kb_evidence(state: State, min_chunks: int = 2, min_length: int = 80) -> bool:
     """
@@ -457,8 +464,8 @@ def _has_sufficient_kb_evidence(state: State, min_chunks: int = 2, min_length: i
     avoid polluting the evidence index with loosely-matched web snippets, which
     degrades citation precision on well-retrieved questions.
 
-    DK enrichment helped image questions (weak KB retrieval, Δcite_prec=+1.7pp) 
-    but hurt text-only questions (good KB retrieval, Δcite_prec=−9.1pp) 
+    DK enrichment helped image questions (weak KB retrieval, Δcite_prec=+1.7pp)
+    but hurt text-only questions (good KB retrieval, Δcite_prec=−9.1pp)
     because topical-but-imprecise web snippets matched at
     the 0.4 cross-encoder threshold and displaced higher-quality KB citations.
 
@@ -472,15 +479,18 @@ def _has_sufficient_kb_evidence(state: State, min_chunks: int = 2, min_length: i
     for key, ci in (state.retrieved_chunks or {}).items():
         if isinstance(key, str) and (key.startswith("dk_web_") or key.startswith("_")):
             continue
-        chunks = ci.text_chunks if hasattr(ci, 'text_chunks') else ci.get('text_chunks', [])
+        chunks = ci.text_chunks if hasattr(ci, "text_chunks") else ci.get("text_chunks", [])
         for chunk in chunks[:5]:
-            if (chunk and len(chunk.strip()) > min_length
-                    and not chunk.strip().lower().startswith(
-                        ("natural science", "social science", "language science"))):
+            if (
+                chunk
+                and len(chunk.strip()) > min_length
+                and not chunk.strip().lower().startswith(("natural science", "social science", "language science"))
+            ):
                 substantive += 1
                 if substantive >= min_chunks:
                     return True
     return False
+
 
 def _enrich_domain_knowledge_evidence(state: State) -> State:
     """
@@ -527,15 +537,12 @@ def _enrich_domain_knowledge_evidence(state: State) -> State:
                 image_rois=[],
             )
             added += 1
-            print(
-                f"  [CitationInjector] DK web: '{claim_clean[:60]}...' "
-                f"→ {len(snippets)} snippets (key={key})"
-            )
+            print(f"  [CitationInjector] DK web: '{claim_clean[:60]}...' → {len(snippets)} snippets (key={key})")
 
     if added:
-        print(f"  [CitationInjector] DK enrichment: {added} domain-knowledge "
-              f"claim(s) backed by web snippets")
+        print(f"  [CitationInjector] DK enrichment: {added} domain-knowledge claim(s) backed by web snippets")
     return state
+
 
 def inject_citations(state: State, encoder=None) -> State:
     """
@@ -566,30 +573,26 @@ def inject_citations(state: State, encoder=None) -> State:
         return state
 
     # Count existing citations BEFORE
-    existing_text = len(re.findall(r'\[Text Evidence \d+\]', reasoning))
-    existing_roi = len(re.findall(r'\[Image ROI \d+\]', reasoning))
-    existing_qi = len(re.findall(r'\[Question Image \d+\]', reasoning))
+    existing_text = len(re.findall(r"\[Text Evidence \d+\]", reasoning))
+    existing_roi = len(re.findall(r"\[Image ROI \d+\]", reasoning))
+    existing_qi = len(re.findall(r"\[Question Image \d+\]", reasoning))
 
     # Count images
     num_images = sum(1 for p in (state.image_paths or []) if p and os.path.exists(p))
     # Step 1: Simple QI injection into OBSERVATIONS (pattern-based only)
     if num_images > 0:
         reasoning = inject_qi_into_observations(reasoning, num_images)
-        
+
     # Step 2: Determine whether cross-encoder matching should run.
     # We always proceed to cross-encoder matching, but skip claims that
     # fall inside the <OBSERVATIONS> block (handled above in match_claims_to_evidence).
     # Only skip if there is genuinely no text evidence at all.
-    has_observations = bool(re.search(
-        r'<(?:OBSERVATIONS|CAPTION)>', reasoning, re.IGNORECASE
-    ))
+    has_observations = bool(re.search(r"<(?:OBSERVATIONS|CAPTION)>", reasoning, re.IGNORECASE))
     text_is_substantive = any(
         len(chunk.strip()) > 50
         for ci in (state.retrieved_chunks or {}).values()
-        for chunk in (ci.text_chunks if hasattr(ci, 'text_chunks') else ci.get('text_chunks', []))[:3]
-        if not chunk.strip().lower().startswith(
-            ("natural science", "social science", "language science")
-        )
+        for chunk in (ci.text_chunks if hasattr(ci, "text_chunks") else ci.get("text_chunks", []))[:3]
+        if not chunk.strip().lower().startswith(("natural science", "social science", "language science"))
     )
 
     # Only skip cross-encoder when there's no useful text evidence at all
@@ -597,14 +600,16 @@ def inject_citations(state: State, encoder=None) -> State:
     if has_observations and not text_is_substantive:
         # Still update with QI injections from step 1
         state.reasoning_steps = [reasoning]
-        final_qi = len(re.findall(r'\[Question Image \d+\]', reasoning))
-        print(f"  CitationInjector: skipped cross-encoder (no substantive text evidence), "
-              f"QuestionImage {existing_qi}→{final_qi}")
+        final_qi = len(re.findall(r"\[Question Image \d+\]", reasoning))
+        print(
+            f"  CitationInjector: skipped cross-encoder (no substantive text evidence), "
+            f"QuestionImage {existing_qi}→{final_qi}"
+        )
         return state
 
     # Step 3: Split into claims
     claims = split_reasoning_into_claims(reasoning)
-    uncited = [c for c in claims if not c['existing_citations']]
+    uncited = [c for c in claims if not c["existing_citations"]]
 
     # Targeted CONCLUSION injection — always attempt to cite the final answer
     # sentence regardless of how many other claims are already cited.
@@ -613,9 +618,7 @@ def inject_citations(state: State, encoder=None) -> State:
     # is uncited the grounding check has no evidence to work with and fails.
     # We extract the conclusion span and mark uncited conclusion claims so the
     # early-exit below cannot skip them.
-    _CONCLUSION_RE = re.compile(
-        r'<CONCLUSION>(.*?)</CONCLUSION>', re.IGNORECASE | re.DOTALL
-    )
+    _CONCLUSION_RE = re.compile(r"<CONCLUSION>(.*?)</CONCLUSION>", re.IGNORECASE | re.DOTALL)
 
     conclusion_span = None
     _cm = _CONCLUSION_RE.search(reasoning)
@@ -625,37 +628,43 @@ def inject_citations(state: State, encoder=None) -> State:
     def _in_conclusion(claim):
         if conclusion_span is None:
             return False
-        return claim['start'] >= conclusion_span[0] and claim['start'] < conclusion_span[1]
+        return claim["start"] >= conclusion_span[0] and claim["start"] < conclusion_span[1]
+
     uncited_conclusion = [c for c in uncited if _in_conclusion(c)]
 
     # If >50% already cited, skip — UNLESS there are uncited conclusion or
-    # reasoning claims that need targeted injection 
+    # reasoning claims that need targeted injection
     # Threshold kept at >50% (reverted from >80%) to avoid injecting
     # weak citations onto transitional/meta sentences.
     cited_count = len(claims) - len(uncited)
     if len(claims) > 0 and cited_count / len(claims) > 0.5:
         # Build evidence index once — shared by both targeted passes below.
         evidence_texts, evidence_labels, is_generic = build_evidence_index(state)
-        
+
         # Conclusion-targeted injection (all question types).
         # grounding_score checks NLI(answer_claim, cited_evidence) — if the
         # conclusion is uncited the grounding check fails.
         if uncited_conclusion and evidence_texts:
             uncited_conclusion = match_claims_to_evidence(
-                uncited_conclusion, evidence_texts, evidence_labels, _encoder,
+                uncited_conclusion,
+                evidence_texts,
+                evidence_labels,
+                _encoder,
                 is_generic=is_generic,
                 threshold=CITATION_THRESHOLD,
                 max_citations_per_claim=2,
             )
-            new_conc = sum(len(c['matched_citations']) for c in uncited_conclusion)
+            new_conc = sum(len(c["matched_citations"]) for c in uncited_conclusion)
             if new_conc > 0:
                 reasoning = inject_citations_into_reasoning(reasoning, uncited_conclusion)
                 print(f"  CitationInjector: conclusion-targeted injection ({new_conc} matches)")
-        
+
         state.reasoning_steps = [reasoning]
-        final_qi = len(re.findall(r'\[Question Image \d+\]', reasoning))
-        print(f"  CitationInjector: {cited_count}/{len(claims)} already cited (>{50}%), "
-              f"QuestionImage {existing_qi}→{final_qi}")
+        final_qi = len(re.findall(r"\[Question Image \d+\]", reasoning))
+        print(
+            f"  CitationInjector: {cited_count}/{len(claims)} already cited (>{50}%), "
+            f"QuestionImage {existing_qi}→{final_qi}"
+        )
         return state
 
     # Step 4: Build evidence index
@@ -667,14 +676,17 @@ def inject_citations(state: State, encoder=None) -> State:
 
     # Step 5: Get cross-encoder and match
     claims = match_claims_to_evidence(
-        claims, evidence_texts, evidence_labels, _encoder,
+        claims,
+        evidence_texts,
+        evidence_labels,
+        _encoder,
         is_generic=is_generic,
         threshold=CITATION_THRESHOLD,
         max_citations_per_claim=2,
     )
 
     # Step 6: Inject matched citations
-    new_citations = sum(len(c['matched_citations']) for c in claims)
+    new_citations = sum(len(c["matched_citations"]) for c in claims)
     if new_citations > 0:
         reasoning = inject_citations_into_reasoning(reasoning, claims)
 
@@ -682,14 +694,16 @@ def inject_citations(state: State, encoder=None) -> State:
     state.reasoning_steps = [reasoning]
 
     # Log results
-    final_text = len(re.findall(r'\[Text Evidence \d+\]', reasoning))
-    final_roi = len(re.findall(r'\[Image ROI \d+\]', reasoning))
-    final_qi = len(re.findall(r'\[Question Image \d+\]', reasoning))
+    final_text = len(re.findall(r"\[Text Evidence \d+\]", reasoning))
+    final_roi = len(re.findall(r"\[Image ROI \d+\]", reasoning))
+    final_qi = len(re.findall(r"\[Question Image \d+\]", reasoning))
 
-    print(f"  CitationInjector: text {existing_text}→{final_text}, "
-          f"ROI {existing_roi}→{final_roi}, "
-          f"QuestionImage {existing_qi}→{final_qi} "
-          f"({new_citations} cross-encoder matches)")
+    print(
+        f"  CitationInjector: text {existing_text}→{final_text}, "
+        f"ROI {existing_roi}→{final_roi}, "
+        f"QuestionImage {existing_qi}→{final_qi} "
+        f"({new_citations} cross-encoder matches)"
+    )
 
     return state
 
@@ -704,14 +718,12 @@ def inject_citations_step(state: State) -> State:
     """
     from tracer import tracer
 
-    with tracer.start_as_current_span(
-        "CitationInjector", openinference_span_kind="chain"
-    ) as span:
+    with tracer.start_as_current_span("CitationInjector", openinference_span_kind="chain") as span:
         state = inject_citations(state)
         reasoning = state.reasoning_steps[0] if state.reasoning_steps else ""
-        text_cites = len(re.findall(r'\[Text Evidence \d+\]', reasoning))
-        roi_cites = len(re.findall(r'\[Image ROI \d+\]', reasoning))
-        qi_cites = len(re.findall(r'\[Question Image \d+\]', reasoning))
+        text_cites = len(re.findall(r"\[Text Evidence \d+\]", reasoning))
+        roi_cites = len(re.findall(r"\[Image ROI \d+\]", reasoning))
+        qi_cites = len(re.findall(r"\[Question Image \d+\]", reasoning))
 
         span.set_attribute("citation_injector.text_citations", text_cites)
         span.set_attribute("citation_injector.roi_citations", roi_cites)

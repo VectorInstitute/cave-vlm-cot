@@ -1,16 +1,19 @@
-import json, os
+import json
+import os
+
 import pandas as pd
-from tqdm import tqdm
-
-# Image Preprocessing : resize image to 224x224
-from PIL import Image
-
-# Caption and OCR generation
-from transformers import BlipProcessor, BlipForConditionalGeneration
-import torch
 
 # OCR with tesseract/ huggingface OCR
 import pytesseract
+import torch
+
+# Image Preprocessing : resize image to 224x224
+from PIL import Image
+from tqdm import tqdm
+
+# Caption and OCR generation
+from transformers import BlipForConditionalGeneration, BlipProcessor
+
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -21,6 +24,7 @@ model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-capt
 TARGET_SIZE = (224, 224)
 OUTPUT_ROOT = "processed_images"
 DATASET_ROOT = os.environ.get("SCIENCEQA_ROOT", "/projects/cave-vlm-cot/scienceqa")
+
 
 def collect_images(split, pid, primary_image_name=None):
     """
@@ -47,6 +51,7 @@ def collect_images(split, pid, primary_image_name=None):
 
     return images
 
+
 # Function to preprocess and save a single image
 def preprocess_and_save_image(input_path, output_path):
     try:
@@ -57,15 +62,16 @@ def preprocess_and_save_image(input_path, output_path):
     except Exception as e:
         print(f"Error processing {input_path}: {e}")
 
+
 # Batch BLIP captioning
 def generate_captions_batch(image_paths, batch_size=8):
     captions = {}
 
     for i in range(0, len(image_paths), batch_size):
-        batch = image_paths[i:i+batch_size]
+        batch = image_paths[i : i + batch_size]
         images = [Image.open(p).convert("RGB") for p in batch]
         inputs = processor(images, return_tensors="pt", padding=True).to(device)
-        
+
         with torch.no_grad():
             outputs = model.generate(**inputs)
 
@@ -74,14 +80,16 @@ def generate_captions_batch(image_paths, batch_size=8):
 
     return captions
 
+
 def run_ocr(image_path):
-  try:
-    img = Image.open(image_path)
-    text = pytesseract.image_to_string(img)
-    return text.strip()
-  except Exception as e:
-    print(f"Error processing {image_path}: {e}")
-    return ""
+    try:
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img)
+        return text.strip()
+    except Exception as e:
+        print(f"Error processing {image_path}: {e}")
+        return ""
+
 
 # Load problem annotations
 data = json.load(open(os.path.join(DATASET_ROOT, "problems.json")))
@@ -102,7 +110,7 @@ for pid, ex in tqdm(data.items()):
     split = ex.get("split", "train")
     img_name = ex.get("image", None)
     image_paths = collect_images(split, pid, img_name)
-    print(f'image paths: {image_paths}')
+    print(f"image paths: {image_paths}")
 
     item = {
         "pid": pid,
@@ -110,19 +118,19 @@ for pid, ex in tqdm(data.items()):
         "question": question,
         "choices": choices,
         "answer": answer,
-        "image_paths": image_paths,      # LIST
+        "image_paths": image_paths,  # LIST
         "hint": hint,
         "lecture": lecture,
         "solution": solution,
         # Placeholder for image caption & OCR output
         # Later you can update this with actual BLIP/CLIP output
-        "img_captions": {},               # BLIP-2 or other model caption
-        "img_ocr": {},                    # Tesseract or HuggingFace OCR text
+        "img_captions": {},  # BLIP-2 or other model caption
+        "img_ocr": {},  # Tesseract or HuggingFace OCR text
         "subject": subject,
         "topic": topic,
         "category": category,
-        "skill": skill
-    }    
+        "skill": skill,
+    }
 
     examples.append(item)
 
@@ -141,7 +149,7 @@ for idx, row in df.iterrows():
 
 # Deduplicate
 all_images = list(dict.fromkeys(all_images))
-print(f'all images: {all_images}')
+print(f"all images: {all_images}")
 
 for in_path, out_path in tqdm(all_images, desc="Preprocessing images"):
     preprocess_and_save_image(in_path, out_path)
@@ -157,9 +165,9 @@ for idx, row in tqdm(df.iterrows(), total=len(df)):
 
     for img_path in row["image_paths"]:
         rel_path = os.path.relpath(img_path, DATASET_ROOT)
-        print(f'relative path: {rel_path}')
+        print(f"relative path: {rel_path}")
         out_path = os.path.join(OUTPUT_ROOT, rel_path)
-        print(f'output path: {out_path}')
+        print(f"output path: {out_path}")
 
         if out_path not in captions_batch:
             continue
